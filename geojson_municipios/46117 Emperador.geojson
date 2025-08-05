@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "46117 Emperador",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34104646117", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34104646117", "NAMEUNIT": "Emperador", "CODNUT1": "ES5", "CODNUT2": "ES52", "CODNUT3": "ES523" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -0.339727633, 39.554475122 ], [ -0.339421, 39.555 ], [ -0.338189, 39.554571 ], [ -0.338503, 39.554069 ], [ -0.338142, 39.553926 ], [ -0.338877, 39.552716 ], [ -0.339494, 39.552962 ], [ -0.340394, 39.553294 ], [ -0.339727633, 39.554475122 ] ] ] } }
+]
+}

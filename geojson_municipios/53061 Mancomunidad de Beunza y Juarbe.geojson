@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53061 Mancomunidad de Beunza y Juarbe",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34153153061", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34153153061", "NAMEUNIT": "Mancomunidad de Beunza y Juarbe", "CODNUT1": "ES2", "CODNUT2": "ES22", "CODNUT3": "ES220" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -1.743009796, 42.979471426 ], [ -1.743050083, 42.981705082 ], [ -1.738898748, 42.98138926 ], [ -1.735570446, 42.982207993 ], [ -1.734534377, 42.983088024 ], [ -1.73096536, 42.984867483 ], [ -1.728064119, 42.984592137 ], [ -1.727193844, 42.98456445 ], [ -1.724110749, 42.984187926 ], [ -1.721410889, 42.983077201 ], [ -1.716590655, 42.981312306 ], [ -1.720406893, 42.980040332 ], [ -1.730022825, 42.978229423 ], [ -1.734162238, 42.979112748 ], [ -1.743009796, 42.979471426 ] ] ] } }
+]
+}

@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53070 Facería de Ayarza",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34153153070", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34153153070", "NAMEUNIT": "Facería de Ayarza", "CODNUT1": "ES2", "CODNUT2": "ES22", "CODNUT3": "ES220" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -2.097443099, 42.615537644 ], [ -2.097207826, 42.617472007 ], [ -2.097142124, 42.620326285 ], [ -2.096914318, 42.62090085 ], [ -2.095503569, 42.621484082 ], [ -2.09414065, 42.622130715 ], [ -2.092133976, 42.622601119 ], [ -2.090597822, 42.622579916 ], [ -2.089735949, 42.6223119 ], [ -2.088520761, 42.622023052 ], [ -2.086500288, 42.620935268 ], [ -2.085763284, 42.620470094 ], [ -2.086617141, 42.620449895 ], [ -2.090092657, 42.6187575 ], [ -2.095726124, 42.616226532 ], [ -2.097443099, 42.615537644 ] ] ] } }
+]
+}

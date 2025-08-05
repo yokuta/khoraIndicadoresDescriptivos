@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53064 Facería de Ezcabarte y otros",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34153153064", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34153153064", "NAMEUNIT": "Facería de Ezcabarte y otros", "CODNUT1": "ES2", "CODNUT2": "ES22", "CODNUT3": "ES220" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -1.669741282, 42.864081314 ], [ -1.668213614, 42.863964484 ], [ -1.666803832, 42.862354157 ], [ -1.667829214, 42.860213877 ], [ -1.669461274, 42.860025752 ], [ -1.675949538, 42.863423921 ], [ -1.676338861, 42.864680138 ], [ -1.669741282, 42.864081314 ] ] ] } }
+]
+}

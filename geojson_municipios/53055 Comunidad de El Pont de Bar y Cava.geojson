@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53055 Comunidad de El Pont de Bar y Cava",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34092553055", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34092553055", "NAMEUNIT": "Comunidad de El Pont de Bar y Cava", "CODNUT1": "ES5", "CODNUT2": "ES51", "CODNUT3": "ES513" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 1.63728688, 42.345101292 ], [ 1.641057228, 42.346857209 ], [ 1.645908009, 42.349271432 ], [ 1.647482911, 42.350053825 ], [ 1.648514031, 42.34955276 ], [ 1.645906274, 42.348425161 ], [ 1.642296136, 42.346869983 ], [ 1.640297189, 42.346095712 ], [ 1.63728688, 42.345101292 ] ] ] } }
+]
+}

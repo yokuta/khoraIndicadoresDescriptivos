@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53017 Comunidad de Canicosa de la Sierra y Vilviestre del Pinar",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953017", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953017", "NAMEUNIT": "Comunidad de Canicosa de la Sierra y Vilviestre del Pinar", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.05649281, 41.952527899 ], [ -3.056300809, 41.953734916 ], [ -3.055231379, 41.9589234 ], [ -3.054712944, 41.95942803 ], [ -3.054169844, 41.959302186 ], [ -3.053107696, 41.958942397 ], [ -3.048786863, 41.957548206 ], [ -3.047628318, 41.957287482 ], [ -3.047821062, 41.956855073 ], [ -3.048182786, 41.956503655 ], [ -3.049015043, 41.956107007 ], [ -3.050909175, 41.955826986 ], [ -3.05251366, 41.955484015 ], [ -3.053189014, 41.9550784 ], [ -3.055986272, 41.952762321 ], [ -3.05649281, 41.952527899 ] ] ] } }
+]
+}

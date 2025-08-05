@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53032 Comunidad de Palacios de la Sierra, Vilviestre del Pinar y San Leonardo de Yagüe",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953032", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953032", "NAMEUNIT": "Comunidad de Palacios de la Sierra, Vilviestre del Pinar y San Leonardo de Yagüe", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.097334001, 41.880779261 ], [ -3.095671266, 41.881789017 ], [ -3.091094078, 41.883567123 ], [ -3.08986518, 41.883874332 ], [ -3.08880484, 41.884064306 ], [ -3.080622498, 41.88502511 ], [ -3.079826272, 41.884422213 ], [ -3.07892178, 41.883972502 ], [ -3.075449689, 41.883119208 ], [ -3.078749944, 41.881468724 ], [ -3.079338585, 41.879946161 ], [ -3.082134855, 41.880178352 ], [ -3.083315229, 41.879655097 ], [ -3.086687235, 41.877878224 ], [ -3.087733574, 41.876346253 ], [ -3.091806138, 41.875901696 ], [ -3.094415269, 41.880042728 ], [ -3.095550449, 41.881590967 ], [ -3.097334001, 41.880779261 ] ] ] } }
+]
+}

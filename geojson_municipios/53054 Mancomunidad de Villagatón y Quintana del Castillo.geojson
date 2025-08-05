@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53054 Mancomunidad de Villagatón y Quintana del Castillo",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34072453054", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34072453054", "NAMEUNIT": "Mancomunidad de Villagatón y Quintana del Castillo", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES413" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -6.098770146, 42.609467582 ], [ -6.090006274, 42.616881285 ], [ -6.089737281, 42.615880017 ], [ -6.08623137, 42.603404 ], [ -6.092587985, 42.605987874 ], [ -6.092874208, 42.606106207 ], [ -6.098268017, 42.609175015 ], [ -6.098770146, 42.609467582 ] ] ] } }
+]
+}

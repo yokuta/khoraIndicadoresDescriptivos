@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53069 Facero de Ujué y Lerga",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34153153069", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34153153069", "NAMEUNIT": "Facero de Ujué y Lerga", "CODNUT1": "ES2", "CODNUT2": "ES22", "CODNUT3": "ES220" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -1.478412014, 42.537326968 ], [ -1.475950533, 42.539896858 ], [ -1.474244991, 42.540423496 ], [ -1.471999904, 42.539105783 ], [ -1.470354924, 42.53615703 ], [ -1.47326606, 42.535124197 ], [ -1.476239327, 42.536037316 ], [ -1.478412014, 42.537326968 ] ] ] } }
+]
+}

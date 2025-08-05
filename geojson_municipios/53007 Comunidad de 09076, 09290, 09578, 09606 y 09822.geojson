@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53007 Comunidad de 09076, 09290, 09578, 09606 y 09822",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953007", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953007", "NAMEUNIT": "Comunidad de 09076, 09290, 09578, 09606 y 09822", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.318915449, 42.002502384 ], [ -3.311744972, 42.005431169 ], [ -3.299726199, 42.0021215 ], [ -3.300019171, 42.000220307 ], [ -3.300042941, 42.000139184 ], [ -3.300550136, 41.99757992 ], [ -3.30145679, 41.992686803 ], [ -3.302421922, 41.987424238 ], [ -3.303457171, 41.979162167 ], [ -3.310581179, 41.989573235 ], [ -3.310848745, 41.989977826 ], [ -3.313774339, 41.993248425 ], [ -3.317599555, 42.000128226 ], [ -3.317648345, 42.000227167 ], [ -3.317721507, 42.000371074 ], [ -3.318915449, 42.002502384 ] ] ] } }
+]
+}

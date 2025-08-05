@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53006 Comunidad de Barbadillo de Herreros y Vallejimeno (E.L.M.)",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953006", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953006", "NAMEUNIT": "Comunidad de Barbadillo de Herreros y Vallejimeno (E.L.M.)", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.19851706, 42.128235474 ], [ -3.199948387, 42.129403834 ], [ -3.199477896, 42.129845968 ], [ -3.197933708, 42.131307684 ], [ -3.195044508, 42.132159228 ], [ -3.192106885, 42.133028794 ], [ -3.19066714, 42.133076223 ], [ -3.191461098, 42.131525793 ], [ -3.192073124, 42.129840564 ], [ -3.19214426, 42.129354096 ], [ -3.192092649, 42.128282413 ], [ -3.19598883, 42.128383915 ], [ -3.19851706, 42.128235474 ] ] ] } }
+]
+}

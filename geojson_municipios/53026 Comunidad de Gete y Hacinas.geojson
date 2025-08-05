@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53026 Comunidad de Gete y Hacinas",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953026", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953026", "NAMEUNIT": "Comunidad de Gete y Hacinas", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.30166925, 41.960927782 ], [ -3.29689353, 41.961561648 ], [ -3.290377979, 41.956426298 ], [ -3.288888583, 41.955268153 ], [ -3.288814156, 41.954817991 ], [ -3.287118969, 41.945418958 ], [ -3.288906139, 41.945783764 ], [ -3.291544352, 41.947578496 ], [ -3.293686562, 41.949050185 ], [ -3.295361817, 41.951279622 ], [ -3.297692804, 41.954381035 ], [ -3.299259199, 41.956493622 ], [ -3.301572988, 41.958424097 ], [ -3.30166925, 41.960927782 ] ] ] } }
+]
+}

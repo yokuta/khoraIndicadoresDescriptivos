@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "16068 Castillejo de Iniesta",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34081616068", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34081616068", "NAMEUNIT": "Castillejo de Iniesta", "CODNUT1": "ES4", "CODNUT2": "ES42", "CODNUT3": "ES423" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -1.715566967, 39.542722877 ], [ -1.714271689, 39.539131543 ], [ -1.713844061, 39.537712225 ], [ -1.711154113, 39.523347331 ], [ -1.709586878, 39.51499557 ], [ -1.766428534, 39.507521543 ], [ -1.777316983, 39.514078872 ], [ -1.790556124, 39.522056252 ], [ -1.791160419, 39.53282971 ], [ -1.791768527, 39.544062704 ], [ -1.767358894, 39.552266865 ], [ -1.764026328, 39.551826009 ], [ -1.752391064, 39.550323118 ], [ -1.743206353, 39.549133918 ], [ -1.719008179, 39.549869826 ], [ -1.715566967, 39.542722877 ] ] ] } }
+]
+}

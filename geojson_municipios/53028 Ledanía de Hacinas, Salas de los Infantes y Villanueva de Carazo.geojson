@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53028 Ledanía de Hacinas, Salas de los Infantes y Villanueva de Carazo",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953028", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953028", "NAMEUNIT": "Ledanía de Hacinas, Salas de los Infantes y Villanueva de Carazo", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.312741723, 42.011715194 ], [ -3.309966422, 42.01220905 ], [ -3.309552803, 42.011588694 ], [ -3.308085016, 42.010241609 ], [ -3.307758475, 42.010143406 ], [ -3.306599435, 42.010209539 ], [ -3.305639846, 42.009050213 ], [ -3.300417598, 42.002786204 ], [ -3.299726199, 42.0021215 ], [ -3.311744972, 42.005431169 ], [ -3.312219346, 42.008609276 ], [ -3.312419597, 42.010049816 ], [ -3.312741723, 42.011715194 ] ] ] } }
+]
+}

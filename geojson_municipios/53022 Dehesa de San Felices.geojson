@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53022 Dehesa de San Felices",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953022", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953022", "NAMEUNIT": "Dehesa de San Felices", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.229789944, 41.955734752 ], [ -3.233125327, 41.953818568 ], [ -3.237206406, 41.95457581 ], [ -3.238127736, 41.955735799 ], [ -3.238975459, 41.956562678 ], [ -3.232449528, 41.960440027 ], [ -3.228768848, 41.960384361 ], [ -3.229400629, 41.958212434 ], [ -3.229626118, 41.957158173 ], [ -3.229888574, 41.956320005 ], [ -3.229923415, 41.955941644 ], [ -3.229789944, 41.955734752 ] ] ] } }
+]
+}

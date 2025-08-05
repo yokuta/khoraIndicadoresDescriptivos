@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53046 Comunidad de Merindad de Río Ubierna, Quintanilla Vivar y Sotragero",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953046", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953046", "NAMEUNIT": "Comunidad de Merindad de Río Ubierna, Quintanilla Vivar y Sotragero", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.702612122, 42.422257165 ], [ -3.69992986, 42.424813225 ], [ -3.700005394, 42.425046918 ], [ -3.700360198, 42.42525189 ], [ -3.700533877, 42.425566037 ], [ -3.700440942, 42.425953858 ], [ -3.700435699, 42.426575299 ], [ -3.700650158, 42.427276451 ], [ -3.700680382, 42.427807615 ], [ -3.699416535, 42.428941064 ], [ -3.69719759, 42.43055762 ], [ -3.695371465, 42.430325541 ], [ -3.693025114, 42.430321723 ], [ -3.690410241, 42.430220408 ], [ -3.694108688, 42.426055375 ], [ -3.701061766, 42.421663249 ], [ -3.702612122, 42.422257165 ] ] ] } }
+]
+}

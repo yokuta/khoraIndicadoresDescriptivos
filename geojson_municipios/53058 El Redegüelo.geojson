@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53058 El Redegüelo",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34132853058", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34132853058", "NAMEUNIT": "El Redegüelo", "CODNUT1": "ES3", "CODNUT2": "ES30", "CODNUT3": "ES300" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.924336819, 40.677498326 ], [ -3.924504528, 40.678461075 ], [ -3.924657767, 40.67987509 ], [ -3.924086695, 40.680251709 ], [ -3.922785484, 40.681055754 ], [ -3.920302581, 40.683015082 ], [ -3.917788262, 40.68493767 ], [ -3.913043985, 40.687537259 ], [ -3.912872858, 40.687311596 ], [ -3.908892171, 40.684464736 ], [ -3.909206692, 40.684271282 ], [ -3.913154766, 40.682471792 ], [ -3.915170506, 40.681036109 ], [ -3.917586137, 40.679170213 ], [ -3.919176218, 40.677427042 ], [ -3.920448536, 40.676933161 ], [ -3.924336819, 40.677498326 ] ] ] } }
+]
+}

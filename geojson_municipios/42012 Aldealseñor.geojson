@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "42012 Aldealseñor",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34074242012", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34074242012", "NAMEUNIT": "Aldealseñor", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES417" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -2.345097574, 41.887829622 ], [ -2.322259442, 41.896622707 ], [ -2.311200773, 41.89588132 ], [ -2.306538806, 41.895574019 ], [ -2.297684824, 41.894988748 ], [ -2.297164782, 41.88965353 ], [ -2.295457809, 41.889228745 ], [ -2.278244194, 41.885023611 ], [ -2.283062346, 41.879910939 ], [ -2.287511441, 41.879740512 ], [ -2.296250636, 41.873021331 ], [ -2.321192362, 41.873333755 ], [ -2.323517832, 41.873365506 ], [ -2.327009963, 41.875907962 ], [ -2.327249555, 41.87604447 ], [ -2.336518597, 41.881709716 ], [ -2.345097574, 41.887829622 ] ] ] } }
+]
+}

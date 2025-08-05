@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53005 Comunidad de Los Ausines y Revilla del Campo",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953005", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953005", "NAMEUNIT": "Comunidad de Los Ausines y Revilla del Campo", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.580659741, 42.180691094 ], [ -3.579823512, 42.180614259 ], [ -3.577285874, 42.179861496 ], [ -3.576108746, 42.1795792 ], [ -3.574969911, 42.179512852 ], [ -3.571918129, 42.17947404 ], [ -3.570720783, 42.179633099 ], [ -3.569159616, 42.179730903 ], [ -3.568338504, 42.179987143 ], [ -3.567628856, 42.180522023 ], [ -3.566969961, 42.181317831 ], [ -3.565704565, 42.180639586 ], [ -3.570991003, 42.174669271 ], [ -3.571759797, 42.173989974 ], [ -3.574695566, 42.175956726 ], [ -3.576730858, 42.178747498 ], [ -3.577399018, 42.178987314 ], [ -3.580232981, 42.180369022 ], [ -3.580659741, 42.180691094 ] ] ] } }
+]
+}

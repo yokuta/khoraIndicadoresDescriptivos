@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53039 Comunidad de Tardajos y Las Quintanillas",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953039", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953039", "NAMEUNIT": "Comunidad de Tardajos y Las Quintanillas", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.860802633, 42.348357284 ], [ -3.86048529, 42.349125176 ], [ -3.860066653, 42.350479219 ], [ -3.860187329, 42.351315876 ], [ -3.860479941, 42.352295342 ], [ -3.860697401, 42.353995852 ], [ -3.856472908, 42.354964072 ], [ -3.8542412, 42.354251211 ], [ -3.852079348, 42.353312636 ], [ -3.851122401, 42.352581239 ], [ -3.847762229, 42.35191264 ], [ -3.843513112, 42.351952949 ], [ -3.845768291, 42.349900989 ], [ -3.847631485, 42.349409925 ], [ -3.849822917, 42.348952426 ], [ -3.852795015, 42.347867673 ], [ -3.854249599, 42.347694751 ], [ -3.857250357, 42.346942895 ], [ -3.860802633, 42.348357284 ] ] ] } }
+]
+}

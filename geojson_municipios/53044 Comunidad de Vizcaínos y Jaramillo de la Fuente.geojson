@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53044 Comunidad de Vizcaínos y Jaramillo de la Fuente",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953044", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953044", "NAMEUNIT": "Comunidad de Vizcaínos y Jaramillo de la Fuente", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.302913674, 42.099024992 ], [ -3.300075132, 42.102328824 ], [ -3.300535972, 42.102597819 ], [ -3.301579328, 42.103288596 ], [ -3.301809925, 42.103459116 ], [ -3.302077572, 42.103791657 ], [ -3.302433676, 42.104925548 ], [ -3.304780682, 42.105063464 ], [ -3.288546435, 42.120398342 ], [ -3.282700648, 42.127987292 ], [ -3.275726671, 42.129634389 ], [ -3.282263605, 42.116703265 ], [ -3.29567052, 42.101817837 ], [ -3.296214033, 42.101663329 ], [ -3.296793825, 42.101508725 ], [ -3.298777669, 42.101602667 ], [ -3.301490275, 42.099794285 ], [ -3.302913674, 42.099024992 ] ] ] } }
+]
+}

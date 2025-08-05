@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53053 Comunidad de Soto de la Vega y Villazala",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34072453053", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34072453053", "NAMEUNIT": "Comunidad de Soto de la Vega y Villazala", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES413" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -5.876258888, 42.347519159 ], [ -5.876283735, 42.347797696 ], [ -5.873701489, 42.350005726 ], [ -5.873623968, 42.353897913 ], [ -5.873586997, 42.355483753 ], [ -5.873563033, 42.356555971 ], [ -5.87004113, 42.361335948 ], [ -5.86992615, 42.361744062 ], [ -5.868922845, 42.361309925 ], [ -5.869620789, 42.35050423 ], [ -5.869860862, 42.350444186 ], [ -5.870665553, 42.350252929 ], [ -5.872095482, 42.349928928 ], [ -5.875605323, 42.347562579 ], [ -5.876258888, 42.347519159 ] ] ] } }
+]
+}

@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "54007 Isla de los Faisanes",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34205454007", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Territorio", "NATCODE": "34205454007", "NAMEUNIT": "Isla de los Faisanes", "CODNUT1": null, "CODNUT2": null, "CODNUT3": null }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -1.766856675, 43.342577461 ], [ -1.766863853, 43.342616941 ], [ -1.766551605, 43.342717434 ], [ -1.766163986, 43.342832284 ], [ -1.765421051, 43.343036861 ], [ -1.764825267, 43.343176834 ], [ -1.764570443, 43.343201957 ], [ -1.764254606, 43.343180423 ], [ -1.764182825, 43.343133765 ], [ -1.764179236, 43.343072751 ], [ -1.764319209, 43.34300097 ], [ -1.76462069, 43.342889709 ], [ -1.765187762, 43.342677955 ], [ -1.76557538, 43.342566694 ], [ -1.765973766, 43.342527214 ], [ -1.766246534, 43.342476967 ], [ -1.76660544, 43.34250568 ], [ -1.766856675, 43.342577461 ] ] ] } }
+]
+}

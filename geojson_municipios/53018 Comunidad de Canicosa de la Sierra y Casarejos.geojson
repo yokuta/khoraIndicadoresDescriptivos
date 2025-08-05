@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "53018 Comunidad de Canicosa de la Sierra y Casarejos",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4258" } },
+"features": [
+{ "type": "Feature", "properties": { "INSPIREID": "ES.IGN.BDDAE.34070953018", "COUNTRY": "ES", "NATLEV": "https://inspire.ec.europa.eu/codelist/AdministrativeHierarchyLevel/4thOrder", "NATLEVNAME": "Municipio", "NATCODE": "34070953018", "NAMEUNIT": "Comunidad de Canicosa de la Sierra y Casarejos", "CODNUT1": "ES4", "CODNUT2": "ES41", "CODNUT3": "ES412" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.045240617, 41.889484288 ], [ -3.044324722, 41.889664765 ], [ -3.043770463, 41.889926167 ], [ -3.04350571, 41.890547743 ], [ -3.040214403, 41.889206831 ], [ -3.039033015, 41.888846934 ], [ -3.034163819, 41.889064546 ], [ -3.037151037, 41.885740153 ], [ -3.038139327, 41.885766871 ], [ -3.040899526, 41.886180295 ], [ -3.042840223, 41.886620962 ], [ -3.044684708, 41.887322829 ], [ -3.045372087, 41.887880998 ], [ -3.045240617, 41.889484288 ] ] ] } }
+]
+}
