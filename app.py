@@ -11,7 +11,11 @@ from shapely.geometry import Point, Polygon
 import matplotlib.pyplot as plt
 import streamlit as st
 from sqlalchemy import create_engine
-import psycopg2
+try:
+    import psycopg2
+    st.write("psycopg2 OK")
+except Exception as e:
+    st.write("psycopg2 NO:", repr(e))
 
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(
