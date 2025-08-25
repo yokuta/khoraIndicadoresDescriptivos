@@ -11,7 +11,7 @@ from shapely.geometry import Point, Polygon
 import matplotlib.pyplot as plt
 import streamlit as st
 from sqlalchemy import create_engine
-
+import psycopg2
 
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(
