@@ -333,35 +333,24 @@ def load_data():
         return None, None, None, None, None, None
 
 @st.cache_data
-def load_internal_bases(selected_muni):
-    """Carga las capas internas desde una sola tabla, filtrando por municipio y CODSIU"""
+def load_internal_bases_all_codsiu(selected_muni):
+    """Carga todos los CODSIU (1-20) para un municipio"""
     try:
         engine = get_db_connection()
         query = """
             SELECT * 
             FROM dev_codeine.siu_siose_with_municipalities
             WHERE municipality ILIKE %(municipality)s
-              AND "CODSIU" = %(codsiu)s
+              AND "CODSIU" BETWEEN 1 AND 20
         """
         with engine.connect() as conn:
-            gdf_09 = gpd.read_postgis(query, conn, geom_col="geom", params={
-                "municipality": f"%{selected_muni}%",
-                "codsiu": 9
+            gdf_all = gpd.read_postgis(query, conn, geom_col="geom", params={
+                "municipality": f"%{selected_muni}%"
             })
-            gdf_14 = gpd.read_postgis(query, conn, geom_col="geom", params={
-                "municipality": f"%{selected_muni}%",
-                "codsiu": 14
-            })
-            gdf_12 = gpd.read_postgis(query, conn, geom_col="geom", params={
-                "municipality": f"%{selected_muni}%",
-                "codsiu": 12
-            })
-
-        return gdf_09, gdf_14, gdf_12
-
+        return gdf_all
     except Exception as e:
         st.error(f"❌ Error cargando capas base desde PostgreSQL: {e}")
-        return None, None, None
+        return None
 
 
 
@@ -448,32 +437,23 @@ with tab1:
         pop_df = df[df["municipio"] == selected_muni]
         with st.spinner("🔍 Procesando capa geográfica del municipio..."):
             gdf_muni = load_municipio_geojson_by_code(selected_muni, df)
-            gdf_base_09, gdf_base_14, gdf_base_12 = load_internal_bases(selected_muni)
+            municipio_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+            st.write(f"🟫 Superficie del municipio: {municipio_area_ha:,.2f} ha")
 
-            if gdf_muni is not None:
-                # Recorte código09
-                result_09 = perform_spatial_clip(gdf_base_09, gdf_muni)
-                if result_09 is not None and not result_09.empty:
-                    st.session_state["sup_cultivos"] = result_09["estal"].sum()
-                else:
-                    st.warning("⚠️ El recorte de código 09 no devolvió resultados.")
-                    st.session_state["sup_cultivos"] = None
-            
-                # Recorte código14
-                result_14 = perform_spatial_clip(gdf_base_14, gdf_muni)
-                if result_14 is not None and not result_14.empty:
-                    st.session_state["sup_cultivos_14"] = result_14["estal"].sum()
-                else:
-                    st.warning("⚠️ El recorte de código 14 no devolvió resultados.")
-                    st.session_state["sup_cultivos_14"] = None
-                # Recorte código12
-                result_12 = perform_spatial_clip(gdf_base_12, gdf_muni)
-                if result_12 is not None and not result_12.empty:
-                    st.session_state["sup_cultivos_12"] = result_12["estal"].sum()
-                else:
-                    st.warning("⚠️ El recorte de código 12 no devolvió resultados.")
-                    st.session_state["sup_cultivos_12"] = None
+            gdf_all_codsiu = load_internal_bases_all_codsiu(selected_muni)
 
+            # Recorte general para todos los CODSIU
+            if gdf_all_codsiu is not None:
+                gdf_all_clipped = perform_spatial_clip(gdf_all_codsiu, gdf_muni)
+                if gdf_all_clipped is not None and not gdf_all_clipped.empty:
+                    gdf_all_clipped["CODSIU"] = gdf_all_clipped["CODSIU"].astype(int)
+                    for cod in [9, 12, 14, 16, 18]:                        
+                        subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == cod]
+                        if not subset.empty:
+                            estal_sum = subset["estal"].sum()
+                            st.session_state[f"sup_cultivos_{cod:02d}"] = estal_sum
+                        else:
+                            st.session_state[f"sup_cultivos_{cod:02d}"] = None                                
             else:
                 st.info("ℹ️ No se encontró geometría para este municipio o falló la carga.")
 
@@ -589,8 +569,12 @@ with tab1:
                 "D.18.c. % Motocicletas": pct_motos if year == "2023" else None
             }
 
-            if "sup_cultivos" in st.session_state and st.session_state["sup_cultivos"] is not None and total:
-                verde_1000hab = round(st.session_state["sup_cultivos"] / (total / 1000), 2)
+            if (
+                "sup_cultivos_09" in st.session_state and 
+                st.session_state["sup_cultivos_09"] is not None and
+                total
+            ):
+                verde_1000hab = round(st.session_state["sup_cultivos_09"] / (total / 1000), 2)
                 row["SUPERFICIE VERDE (ha cada 1.000 hab)"] = verde_1000hab
             else:
                 row["SUPERFICIE VERDE (ha cada 1.000 hab)"] = None
@@ -648,6 +632,43 @@ with tab1:
                     row["D.25 Viviendas por persona"] = round((v_total / pop_2021) * 1000, 4)
                 except:
                     pass
+            # Indicador nuevo: Superficie cultivos código16 / superficie municipio
+            try:
+                if (
+                    "sup_cultivos_16" in st.session_state and 
+                    st.session_state["sup_cultivos_16"] is not None and
+                    gdf_muni is not None and 
+                    not gdf_muni.empty
+                ):
+                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                    if muni_area_ha > 0:
+                        pct16 = round((st.session_state["sup_cultivos_16"] / muni_area_ha) * 100, 2)
+                        row["% Cultivos Código 16 / Sup. Municipio"] = pct16
+                    else:
+                        row["% Cultivos Código 16 / Sup. Municipio"] = None
+                else:
+                    row["% Cultivos Código 16 / Sup. Municipio"] = None
+            except:
+                row["% Cultivos Código 16 / Sup. Municipio"] = None
+
+            # Indicador nuevo: Superficie cultivos código16 / superficie municipio
+            try:
+                if (
+                    "sup_cultivos_18" in st.session_state and 
+                    st.session_state["sup_cultivos_18"] is not None and
+                    gdf_muni is not None and 
+                    not gdf_muni.empty
+                ):
+                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                    if muni_area_ha > 0:
+                        pct16 = round((st.session_state["sup_cultivos_18"] / muni_area_ha) * 100, 2)
+                        row["% Cultivos Código 18 / Sup. Municipio"] = pct16
+                    else:
+                        row["% Cultivos Código 18 / Sup. Municipio"] = None
+                else:
+                    row["% Cultivos Código 18 / Sup. Municipio"] = None
+            except:
+                row["% Cultivos Código 18 / Sup. Municipio"] = None
 
             results.append(row)
 
@@ -666,11 +687,74 @@ with tab1:
 
         with col2:
             show_map = st.toggle("🗺️ Mostrar/Ocultar Mapa del Municipio", value=False)
+      
 
         if selected_muni and gdf_muni is not None and show_map:
-            st.markdown("### 🗺️ Mapa del Municipio")
-            map_muni = create_folium_map(gdf_muni, f"Municipio: {selected_muni}")
-            st_folium(map_muni, width=700, height=500, key="map_municipio_expandido")
+            st.markdown("### 🗺️ Mapa del Municipio con Recortes SIU")
+
+            gdf_muni_4326 = gdf_muni.to_crs(4326)
+            bounds = gdf_muni_4326.total_bounds
+            center_lat = (bounds[1] + bounds[3]) / 2
+            center_lon = (bounds[0] + bounds[2]) / 2
+
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
+
+            # Capa del municipio (rojo)
+            folium.GeoJson(
+                gdf_muni_4326.__geo_interface__,
+                name="Municipio",
+                style_function=lambda feature: {
+                    'fillColor': 'red',
+                    'color': 'red',
+                    'weight': 2,
+                    'fillOpacity': 0.1,
+                },
+                tooltip="Municipio"
+            ).add_to(m)
+
+            import matplotlib
+
+            if gdf_all_clipped is not None and not gdf_all_clipped.empty:
+                gdf_all_clipped = gdf_all_clipped.to_crs(4326)
+                
+                # Generar paleta de colores
+                unique_codsiu = sorted(gdf_all_clipped["CODSIU"].unique())
+                color_map = plt.get_cmap('tab20', len(unique_codsiu))  # 20 colores
+                codsiu_to_color = {
+                    cod: matplotlib.colors.rgb2hex(color_map(i)) for i, cod in enumerate(unique_codsiu)
+                }
+            
+                for codsiu in unique_codsiu:
+                    subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == codsiu]
+                    folium.GeoJson(
+                        subset.__geo_interface__,
+                        name=f"CODSIU {codsiu}",
+                        style_function=lambda feature, color=codsiu_to_color[codsiu]: {
+                            'fillColor': color,
+                            'color': color,
+                            'weight': 1,
+                            'fillOpacity': 0.4,
+                        },
+                        tooltip=folium.GeoJsonTooltip(
+                            fields=["CODSIU", "descripcion", "municipality"],
+                            aliases=["Código SIU:", "Descripción:", "Municipio:"],
+                            localize=True,
+                            sticky=True,
+                            labels=True,
+                            style="""
+                                background-color: white;
+                                border: 1px solid #ccc;
+                                border-radius: 3px;
+                                box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+                                font-size: 10px;
+                                padding: 4px;
+                            """
+                        )
+
+                    ).add_to(m)
+            
+
+            st_folium(m, width=1500, height=500, key="map_municipio_expandido")
 
         
         # -------------------- HISTORICAL POPULATION GRAPH --------------------
