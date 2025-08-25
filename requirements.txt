@@ -9,4 +9,4 @@ openpyxl
 pyarrow
 pyproj
 sqlalchemy
-psycopg2
+psycopg2-binary
