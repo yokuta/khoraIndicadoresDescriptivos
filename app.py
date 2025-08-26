@@ -326,9 +326,25 @@ def load_data():
         df_hog_2011 = pd.read_parquet("structured_censo2011_hogares.parquet")
         df_hog_2021 = pd.read_parquet("structured_censo2021_hogares.parquet")
         df_censo2011 = pd.read_parquet("structured_censo2011_viviendas.parquet")
-        df_dgt = pd.read_parquet("dgt2023.parquet")
-        df_dgt["municipio_completo"] = df_dgt["Código INE"].astype(str).str.zfill(5) + " " + df_dgt["Municipio"]
-        return df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt
+        dgt_files = {
+            "2021": "dgt2021.parquet",
+            "2022": "dgt2022.parquet",
+            "2023": "dgt2023.parquet",
+            "2024": "dgt2024.parquet",
+        }
+        df_dgt_by_year = {}
+        for y, path in dgt_files.items():
+            try:
+                d = pd.read_parquet(path)
+                # clave de emparejamiento igual que usabas
+                d["municipio_completo"] = d["Código INE"].astype(str).str.zfill(5) + " " + d["Municipio"]
+                df_dgt_by_year[y] = d
+            except Exception:
+                df_dgt_by_year[y] = None  # si falta el fichero, evita fallar
+
+        return df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt_by_year
+    
+            
     except Exception as e:
         st.error(f"❌ No se pudieron cargar los archivos Parquet: {e}")
         return None, None, None, None, None, None
@@ -394,7 +410,8 @@ with tab1:
     # Load original data
     data_loaded = load_data()
     if all(d is not None for d in data_loaded):
-        df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt = data_loaded
+        df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt_by_year = data_loaded
+
     else:
         st.error("❌ No se pudieron cargar los datos base del INE")
         st.stop()
@@ -489,23 +506,8 @@ with tab1:
         except:
             viv_vacia_pct_2011 = None
 
-        # Vehículos DGT
-        df_dgt["municipio_completo"] = df_dgt["Código INE"].astype(str).str.zfill(5) + " " + df_dgt["Municipio"]
-        dgt_row = df_dgt[df_dgt["municipio_completo"].str.lower() == selected_muni.lower()]
 
-        try:
-            turismos = dgt_row["Parque Turismos"].values[0]
-            motos = dgt_row["Parque Motocicletas"].values[0]
-            total_veh = dgt_row["Parque Total"].values[0]
-            pop_2024 = pop_df["total_total_total_2024"].values[0]
-
-            veh_1000hab = round((turismos + motos) / pop_2024 * 1000, 2) if pop_2024 else None
-            pct_turismos = round(turismos / total_veh * 100, 2) if total_veh else None
-            pct_motos = round(motos / total_veh * 100, 2) if total_veh else None
-        except:
-            veh_1000hab = None
-            pct_turismos = None
-            pct_motos = None
+    
 
         # Result table
         results = []
@@ -551,24 +553,62 @@ with tab1:
             pop_0_14 = pop_df[[f"total_{age}_total_{year}" for age in ages_0_14 if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
             pop_15_64 = pop_df[[f"total_{age}_total_{year}" for age in ages_15_64 if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
 
+             # --- Indicadores DGT por año ---
+            veh_1000hab, pct_turismos, pct_motos = None, None, None
+            try:
+                df_dgt_year = df_dgt_by_year.get(year)
+                if df_dgt_year is not None:
+                    dgt_row = df_dgt_year[df_dgt_year["municipio_completo"].str.lower() == selected_muni.lower()]
+                    if not dgt_row.empty:
+                        turismos = dgt_row["Parque Turismos"].values[0]
+                        motos = dgt_row["Parque Motocicletas"].values[0]
+                        total_veh = turismos + motos
+                        total_total = dgt_row["Parque Total"].values[0]
+                        pop_year = total
+                        if pop_year and (turismos is not None) and (motos is not None):
+                            veh_1000hab = round((turismos + motos) / pop_year * 1000, 2)
+                        if total_veh:
+                            pct_turismos = round(turismos / total_total * 100, 2)
+                            pct_motos = round(motos / total_total * 100, 2)
+            except Exception:
+                pass
+
             row = {
                 "Año": year,
-                "Variación Poblacional Últimos 10 años (%)": pop_variation_dict.get(year),
+                "D.1 Variación Poblacional Últimos 10 años (%)": pop_variation_dict.get(year),
+                "D.18.a. Vehículos domiciliados cada 1000 hab.": veh_1000hab,
+                "D.18.b. % Turismos": pct_turismos,
+                "D.18.c. % Motocicletas": pct_motos,
                 "D.22.a. Envejecimiento (%)": round(over_65 / total * 100, 2) if total else None,
                 "D.22.b. Senectud (%)": round(over_85 / over_65 * 100, 2) if over_65 else None,
-                "Población extranjera (%)": round(foreign / total * 100, 2) if total else None,
+                "D.23 Población extranjera (%)": round(foreign / total * 100, 2) if total else None,
                 "D.24.a. Dependencia total (%)": round((pop_0_14 + over_65) / pop_15_64 * 100, 2) if pop_15_64 else None,
                 "D.24.b. Dependencia infantil (%)": round(pop_0_14 / pop_15_64 * 100, 2) if pop_15_64 else None,
                 "D.24.c. Dependencia mayores (%)": round(over_65 / pop_15_64 * 100, 2) if pop_15_64 else None,
-                "%Vivienda secundaria": None,
                 "D.25 Viviendas por persona": None,
-                "VARIACIÓN HOGARES 2011-2021 (%)": var_hogares_pct if year == "2021" else None,
-                "CRECIMIENTO PARQUE VIVIENDAS 2011-2021 (%)": crecimiento_viviendas_pct if year == "2021" else None,
-                "VIVIENDA VACÍA 2011 (%)": viv_vacia_pct_2011 if year == "2021" else None,
-                "D.18.a. Vehículos domiciliados cada 1000 hab.": veh_1000hab if year == "2024" else None,
-                "D.18.b. % Turismos": pct_turismos if year == "2023" else None,
-                "D.18.c. % Motocicletas": pct_motos if year == "2023" else None
+                "D.32 Variación hogares 2011-2021 (%)": var_hogares_pct if year == "2021" else None,
+                "D.33 Crecimiento parque viviendas 2011-2021 (%)": crecimiento_viviendas_pct if year == "2021" else None,
+                "D.34 Vivienda secundaria (%)": None,
+                "D.35 Vivienda vacía 2011 (%)": viv_vacia_pct_2011 if year == "2021" else None,
             }
+            # Indicador nuevo: Superficie cultivos código16 / superficie municipio
+            try:
+                if (
+                    "sup_cultivos_16" in st.session_state and 
+                    st.session_state["sup_cultivos_16"] is not None and
+                    gdf_muni is not None and 
+                    not gdf_muni.empty
+                ):
+                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                    if muni_area_ha > 0:
+                        pct16 = round((st.session_state["sup_cultivos_16"] / muni_area_ha) * 100, 2)
+                        row["D.02.b. Superficie de Cultivos (cod_16)"] = pct16
+                    else:
+                        row["D.02.b. Superficie de Cultivos (cod_16)"] = None
+                else:
+                    row["D.02.b. Superficie de Cultivos (cod_16)"] = None
+            except:
+                row["D.02.b. Superficie de Cultivos (cod_16)"] = None
 
             if (
                 "sup_cultivos_09" in st.session_state and 
@@ -576,9 +616,9 @@ with tab1:
                 total
             ):
                 verde_1000hab = round(st.session_state["sup_cultivos_09"] / (total / 1000), 2)
-                row["SUPERFICIE VERDE (ha cada 1.000 hab)"] = verde_1000hab
+                row["D.5. Superficie verde (ha cada 1.000 hab) (cod_09)"] = verde_1000hab
             else:
-                row["SUPERFICIE VERDE (ha cada 1.000 hab)"] = None
+                row["D.5. Superficie verde (ha cada 1.000 hab) (cod_09)"] = None
 
             # Indicador nuevo: Superficie cultivos código14 / superficie municipio
             try:
@@ -591,13 +631,13 @@ with tab1:
                     muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
                     if muni_area_ha > 0:
                         sup14_pct = round((st.session_state["sup_cultivos_14"] / muni_area_ha) * 100, 2)
-                        row["% Cultivos Código 14 / Sup. Municipio"] = sup14_pct
+                        row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = sup14_pct
                     else:
-                        row["% Cultivos Código 14 / Sup. Municipio"] = None
+                        row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
                 else:
-                    row["% Cultivos Código 14 / Sup. Municipio"] = None
+                    row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
             except:
-                row["% Cultivos Código 14 / Sup. Municipio"] = None
+                row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
 
             # Indicadores para código 12
             try:
@@ -608,49 +648,32 @@ with tab1:
                     not gdf_muni.empty
                 ):
                     # Indicador 1: solo la superficie
-                    row["Superficie Cultivos (cod: 12) ha"] = round(st.session_state["sup_cultivos_12"], 2)
+                    row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = round(st.session_state["sup_cultivos_12"], 2)
             
                     # Indicador 2: porcentaje sobre sup. municipal
                     muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
                     if muni_area_ha > 0:
                         pct12 = round((st.session_state["sup_cultivos_12"] / muni_area_ha) * 100, 2)
-                        row["% Cultivos Código 12 / Sup. Municipio"] = pct12
+                        row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = pct12
                     else:
-                        row["% Cultivos Código 12 / Sup. Municipio"] = None
+                        row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
                 else:
-                    row["Superficie Cultivos (cod: 12) ha"] = None
-                    row["% Cultivos Código 12 / Sup. Municipio"] = None
+                    row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = None
+                    row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
             except:
-                row["Superficie Cultivos (cod: 12) ha"] = None
-                row["% Cultivos Código 12 / Sup. Municipio"] = None
+                row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = None
+                row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
             
             if year == "2021":
                 try:
                     v_total = censo_df["viviendasT"].values[0]
                     v_nop = censo_df["viviendasNoP"].values[0]
                     pop_2021 = pop_df["total_total_total_2021"].values[0]
-                    row["%Vivienda secundaria"] = round((v_nop / v_total) * 100, 2)
+                    row["D.34 Vivienda secundaria (%)"] = round((v_nop / v_total) * 100, 2)
                     row["D.25 Viviendas por persona"] = round((v_total / pop_2021) * 1000, 4)
                 except:
                     pass
-            # Indicador nuevo: Superficie cultivos código16 / superficie municipio
-            try:
-                if (
-                    "sup_cultivos_16" in st.session_state and 
-                    st.session_state["sup_cultivos_16"] is not None and
-                    gdf_muni is not None and 
-                    not gdf_muni.empty
-                ):
-                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
-                    if muni_area_ha > 0:
-                        pct16 = round((st.session_state["sup_cultivos_16"] / muni_area_ha) * 100, 2)
-                        row["% Cultivos Código 16 / Sup. Municipio"] = pct16
-                    else:
-                        row["% Cultivos Código 16 / Sup. Municipio"] = None
-                else:
-                    row["% Cultivos Código 16 / Sup. Municipio"] = None
-            except:
-                row["% Cultivos Código 16 / Sup. Municipio"] = None
+            
 
             # Indicador nuevo: Superficie cultivos código16 / superficie municipio
             try:
@@ -663,17 +686,31 @@ with tab1:
                     muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
                     if muni_area_ha > 0:
                         pct16 = round((st.session_state["sup_cultivos_18"] / muni_area_ha) * 100, 2)
-                        row["% Cultivos Código 18 / Sup. Municipio"] = pct16
+                        row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = pct16
                     else:
-                        row["% Cultivos Código 18 / Sup. Municipio"] = None
+                        row["D.02.a. Superficie de Cobertura Artificial (cod_18)    "] = None
                 else:
-                    row["% Cultivos Código 18 / Sup. Municipio"] = None
+                    row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
             except:
-                row["% Cultivos Código 18 / Sup. Municipio"] = None
+                row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
 
             results.append(row)
 
         results_df = pd.DataFrame(results)
+        import re
+
+        # Ordenar columnas por el número después de "D."
+        def get_d_number(col):
+            match = re.search(r"D\.(\d+)", col)
+            if match:
+                return int(match.group(1))
+            return 9999  # columnas que no tengan D.x al final
+
+        ordered_cols = sorted(results_df.columns, key=get_d_number)
+
+        # Reordenar DataFrame
+        results_df = results_df[["Año"] + [c for c in ordered_cols if c != "Año"]]
+
 
         st.markdown(f"### 📈 Indicadores para **{selected_muni}**")
 
