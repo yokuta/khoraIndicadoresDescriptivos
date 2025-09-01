@@ -9,9 +9,8 @@ import tempfile
 import os
 from shapely.geometry import Point, Polygon
 import matplotlib.pyplot as plt
-import streamlit as st
 from sqlalchemy import create_engine
-import psycopg2
+import unicodedata, re, numpy as np
 
 
 # -------------------- PAGE CONFIG --------------------
@@ -399,16 +398,13 @@ def load_municipio_geojson_by_code(municipio, df):
 
 
 # === PARO & CONTRATOS DESDE PARQUET GLOBAL ===
-import unicodedata, re
-import numpy as np
-import pandas as pd
 
 def normalize_muni(name: str) -> str:
     """Quita código si viene '28079 Madrid', elimina tildes y pasa a MAYÚSCULAS."""
     if pd.isna(name):
         return None
     s = str(name).strip()
-    m = re.match(r"^\s*\d+\s+(.+)$", s)   # quita CPRO+CMUN si aparece
+    m = re.match(r"^\s*\d+\s+(.+)$", s)
     if m:
         s = m.group(1)
     s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
@@ -418,18 +414,13 @@ def normalize_muni(name: str) -> str:
 def load_sepe_parquet(path="sepe_global.parquet"):
     df = pd.read_parquet(path)
 
-    # --- Unificar a una columna muni y crear muni_norm ---
+    # Unificar municipio y normalizar mes
     if "pMunicipio" in df.columns or "cMunicipio" in df.columns:
-        df["muni"] = np.where(
-            df.get("pMunicipio").notna() if "pMunicipio" in df.columns else False,
-            df.get("pMunicipio"),
-            df.get("cMunicipio")
-        )
+        df["muni"] = df.get("pMunicipio").fillna(df.get("cMunicipio"))
         df["muni_norm"] = df["muni"].apply(normalize_muni)
     else:
         raise ValueError("El parquet SEPE no tiene columnas de municipio (pMunicipio/cMunicipio).")
 
-    # --- Normalizar mes y construir fecha ---
     mes_map = {
         "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
         "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,
@@ -437,14 +428,51 @@ def load_sepe_parquet(path="sepe_global.parquet"):
     }
     df["mes_norm"] = df["mes"].astype(str).str.strip().str.lower()
     df["mes_num"]  = df["mes_norm"].map(mes_map)
-    df = df[df["mes_num"].notna()]  # por si hubiera meses raros
-    df["fecha"] = pd.to_datetime(dict(year=df["anio"].astype(int), month=df["mes_num"].astype(int), day=1))
+    df = df[df["mes_num"].notna()].copy()
+    df["anio"] = df["anio"].astype(int)
+    df["fecha"] = pd.to_datetime(dict(year=df["anio"], month=df["mes_num"].astype(int), day=1))
+
+    # >>> NUEVO: preservar orden original para "primera coincidencia"
+    df["row_order"] = df.reset_index().index
 
     return df
 
+
+def subset_muni_first(df: pd.DataFrame, display_muni: str) -> pd.DataFrame:
+    """
+    Devuelve solo las filas del municipio (muni_norm) quedándose con
+    el PRIMER valor crudo de 'muni' que aparece en el parquet (por row_order).
+    Útil cuando 'SORIA' aparece como municipio y luego como provincia.
+    """
+    target = normalize_muni(display_muni)
+    if "muni_norm" not in df.columns:
+        return df.iloc[0:0].copy()
+
+    # Filtra por el normalizado y orden original
+    cand = df[df["muni_norm"] == target].copy()
+    if "row_order" in cand.columns:
+        cand = cand.sort_values("row_order")
+    if cand.empty:
+        return cand
+
+    # Primer 'muni' crudo que aparece para ese muni_norm
+    first_raw = cand["muni"].dropna().iloc[0]
+
+    # Mantén solo ese 'muni' crudo
+    filtered = df[(df["muni_norm"] == target) & (df["muni"] == first_raw)].copy()
+
+    # Mensaje útil si hubo más de un crudo distinto
+    other_raws = cand["muni"].dropna().unique().tolist()
+    if len(set(other_raws)) > 1:
+        st.caption(f"🔎 Coincidencias múltiples para **{display_muni}**: {other_raws}. "
+                   f"Usando la primera: **{first_raw}**")
+
+    return filtered
+
+
 def build_timeseries(df_sepe: pd.DataFrame, display_muni: str):
     target = normalize_muni(display_muni)
-
+    df_muni = subset_muni_first(df_sepe, display_muni)
     # --- PARO ---
     if "tipo" in df_sepe.columns:
         df_paro = df_sepe[(df_sepe["tipo"]=="p") & (df_sepe["muni_norm"]==target)].copy()
@@ -466,6 +494,229 @@ def build_timeseries(df_sepe: pd.DataFrame, display_muni: str):
                           .sort_values("fecha"))
 
     return ts_paro, ts_cont
+
+def _sector_percentages_from_row(row) -> pd.Series:
+    tot = float(row.get("cTotal", 0) or 0)
+    if tot <= 0 or pd.isna(tot):
+        return pd.Series([None]*4, index=["agr","ind","con","ser"])
+    return pd.Series([
+        round(row.get("cSAgricultura", 0)/tot*100, 2),
+        round(row.get("cSIndustria", 0)/tot*100, 2),
+        round(row.get("cSConstruccion", 0)/tot*100, 2),
+        round(row.get("cSServicios", 0)/tot*100, 2),
+    ], index=["agr","ind","con","ser"])
+
+
+def sector_shares_by_year(df_sepe: pd.DataFrame, display_muni: str, debug: bool=False) -> pd.DataFrame:
+    target = normalize_muni(display_muni)
+
+    # 1) Filtra CONTRATOS del municipio y fija un único "muni" crudo
+    dfc_all = subset_muni_first(df_sepe, display_muni)
+    dfc = dfc_all[dfc_all.get("tipo") == "c"].copy()
+    if dfc.empty:
+        if debug: st.info("D.26: no hay filas para este municipio.")
+        return pd.DataFrame(columns=[
+            "anio","agr_avg","ind_avg","con_avg","ser_avg","agr_sep","ind_sep","con_sep","ser_sep"
+        ])
+
+    # 2) Asegura numéricos
+    cols = ["cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]
+    for c in cols:
+        if c in dfc.columns:
+            dfc[c] = pd.to_numeric(dfc[c], errors="coerce").fillna(0)
+        else:
+            dfc[c] = 0
+
+    # 3) Quedarse con UNA fila por (anio, mes_num) usando el orden original si existe
+    if "row_order" not in dfc.columns:
+        dfc["row_order"] = dfc.reset_index().index
+
+    # Ordena por año, mes y orden original; luego elimina duplicados por (anio, mes_num)
+    dfc_clean = (dfc.sort_values(["anio","mes_num","row_order"])
+                   .drop_duplicates(subset=["anio","mes_num"], keep="first")
+                   .copy())
+
+    # 4) Construir "monthly" DESDE LOS BRUTOS (ya depurados a 1 fila por mes)
+    #    (groupby + sum no cambia los valores porque ya hay 1 fila por mes, pero lo dejamos por seguridad)
+    monthly = (dfc_clean.groupby(["anio","mes_num"], as_index=False)[cols].sum())
+
+    # 5) % mensuales por sector
+    monthly["agr_pct"] = (monthly["cSAgricultura"] / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+    monthly["ind_pct"] = (monthly["cSIndustria"]   / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+    monthly["con_pct"] = (monthly["cSConstruccion"]/ monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+    monthly["ser_pct"] = (monthly["cSServicios"]   / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+
+    # 6) MEDIA anual (promedio simple de los % mensuales)
+    year_avg = (monthly.groupby("anio", as_index=False)[["agr_pct","ind_pct","con_pct","ser_pct"]]
+                        .mean().round(2)
+                        .rename(columns={
+                            "agr_pct":"agr_avg","ind_pct":"ind_avg",
+                            "con_pct":"con_avg","ser_pct":"ser_avg"
+                        }))
+
+    # 7) SEPTIEMBRE: % solo para mes 9
+    sep = (monthly[monthly["mes_num"]==9][["anio","agr_pct","ind_pct","con_pct","ser_pct"]]
+           .rename(columns={
+               "agr_pct":"agr_sep","ind_pct":"ind_sep",
+               "con_pct":"con_sep","ser_pct":"ser_sep"
+           }).round(2))
+
+    out = year_avg.merge(sep, on="anio", how="left")
+
+    # 8) Debug opcional mostrando EXACTAMENTE los datos depurados
+    if debug:
+        st.subheader("🧪 D.26 DEBUG – % mensuales y medias anuales (desde brutos depurados)")
+        st.caption("Brutos depurados a 1 fila por mes (dfc_clean):")
+        cols_dbg = ["anio","mes_num","muni","archivo","sheet_name"] + cols
+        cols_dbg = [c for c in cols_dbg if c in dfc_clean.columns]
+        st.dataframe(dfc_clean.sort_values(["anio","mes_num"])[cols_dbg],
+                     use_container_width=True)
+
+        st.caption("Matriz mensual (tras depurar → 1 fila/mes y calcular %):")
+        st.dataframe(monthly.sort_values(["anio","mes_num"])[
+            ["anio","mes_num","cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios",
+             "agr_pct","ind_pct","con_pct","ser_pct"]
+        ], use_container_width=True)
+
+        st.caption("Medias anuales de % + septiembre:")
+        dbg = out.copy()
+        dbg["sum_%_avg"] = dbg[["agr_avg","ind_avg","con_avg","ser_avg"]].sum(axis=1).round(2)
+        st.dataframe(dbg.sort_values("anio"), use_container_width=True)
+
+    return out
+
+
+def keep_one_per_month(df: pd.DataFrame, prefer: str = "first") -> pd.DataFrame:
+    """
+    Devuelve una única fila por (anio, mes_num).
+    prefer = "first"  -> usa el orden original (row_order) si existe.
+    prefer = "min"    -> usa la fila con menor cTotal (si existe cTotal).
+    """
+    key = ["anio", "mes_num"]
+    tmp = df.copy()
+
+    if prefer == "min" and "cTotal" in tmp.columns:
+        tmp = (tmp.sort_values(key + ["cTotal"])
+                  .drop_duplicates(subset=key, keep="first"))
+    else:
+        extra = ["row_order"] if "row_order" in tmp.columns else []
+        tmp = (tmp.sort_values(key + extra)
+                  .drop_duplicates(subset=key, keep="first"))
+    return tmp
+
+
+def show_d26_debug(df_sepe: pd.DataFrame, display_muni: str):
+    """
+    Depuración de D.26 para un municipio:
+      - Bruto mensual (filas originales)
+      - Agregado por mes (sumas y %)
+      - Agregado anual (sumas y %)
+      - Septiembre (sumas y %)
+      - Conteo de filas por mes (posibles duplicados)
+    """
+    
+
+    # 1) filtra CONTRATOS y aplica "quédate con el primer municipio crudo"
+    dfc_all = df_sepe[df_sepe.get("tipo") == "c"].copy()
+    dfc = subset_muni_first(dfc_all, display_muni)   # <<--- AQUÍ se fuerza el primero
+    if dfc.empty:
+        st.warning("No hay registros de CONTRATOS para este municipio en el parquet.")
+        return
+
+    # 2) asegura tipos numéricos
+    cols = ["cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]
+    for c in cols:
+        dfc[c] = pd.to_numeric(dfc[c], errors="coerce")
+    dfc[cols] = dfc[cols].fillna(0)
+
+    # 3) selector de año
+    years = sorted(dfc["anio"].dropna().astype(int).unique())
+    year_sel = st.selectbox("Año (depuración D.26)", years, index=len(years)-1)
+    dfc_y = dfc[dfc["anio"] == year_sel].copy()
+    dfc_y = keep_one_per_month(dfc_y, prefer="first")
+
+    # --- (1) bruto mensual
+    st.subheader("🔢 Bruto mensual (filas originales)")
+    raw_cols = ["anio","mes_num","mes","fecha","muni","archivo","sheet_name"] + cols
+    raw_cols = [c for c in raw_cols if c in dfc_y.columns]
+    df_raw = dfc_y[raw_cols].copy()
+
+    sec_cols = [c for c in ["cSAgricultura","cSIndustria","cSConstruccion","cSServicios"] if c in df_raw.columns]
+    if sec_cols:
+        df_raw["sum_sectores"] = df_raw[sec_cols].sum(axis=1)
+        df_raw["gap_total_minus_sect"] = df_raw.get("cTotal", 0) - df_raw["sum_sectores"]
+        if "cSAgricultura" in df_raw.columns and "cTotal" in df_raw.columns:
+            df_raw["%Agr_fila"] = (df_raw["cSAgricultura"] / df_raw["cTotal"] * 100)\
+                                    .replace([np.inf, -np.inf], np.nan).round(2)
+    st.dataframe(df_raw.sort_values(["anio","mes_num"]), use_container_width=True)
+
+    # --- (2) agregado por mes
+    st.subheader("📦 Agregado por mes (sumas y %)")
+    gb = (dfc_y.groupby(["anio","mes_num","mes"], as_index=False)[cols].sum())
+    gb["sum_sectores"] = gb[["cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]].sum(axis=1)
+    gb["gap_total_minus_sect"] = gb["cTotal"] - gb["sum_sectores"]
+    gb["%Agr"] = (gb["cSAgricultura"] / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+    gb["%Ind"] = (gb["cSIndustria"]   / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+    gb["%Con"] = (gb["cSConstruccion"]/ gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+    gb["%Ser"] = (gb["cSServicios"]   / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+    st.dataframe(gb.sort_values("mes_num"), use_container_width=True)
+
+    # --- (3) agregado anual
+    st.subheader("🧮 Agregado ANUAL (sumas del año y %)")
+    annual = dfc_y[cols].sum().to_frame("valor").T
+    annual.insert(0, "anio", year_sel)
+    annual["%Agr"] = (annual["cSAgricultura"] / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+    annual["%Ind"] = (annual["cSIndustria"]   / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+    annual["%Con"] = (annual["cSConstruccion"]/ annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+    annual["%Ser"] = (annual["cSServicios"]   / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+    st.dataframe(annual, use_container_width=True)
+
+    # --- (4) septiembre
+    st.subheader("📌 SEPTIEMBRE (sumas de septiembre y %)")
+    sep = dfc_y[dfc_y["mes_num"] == 9][cols].sum().to_frame("valor").T
+    sep.insert(0, "anio", year_sel)
+    sep["%Agr"] = (sep["cSAgricultura"] / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+    sep["%Ind"] = (sep["cSIndustria"]   / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+    sep["%Con"] = (sep["cSConstruccion"]/ sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+    sep["%Ser"] = (sep["cSServicios"]   / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+    st.dataframe(sep, use_container_width=True)
+
+    # --- (5) conteo filas por mes (ya sobre un único municipio crudo)
+    st.caption("🧩 Conteo de filas por mes (para detectar duplicados o múltiples filas por mes)")
+    cnt = dfc_y.groupby(["anio","mes_num"]).size().reset_index(name="n_filas")
+    st.dataframe(cnt.sort_values("mes_num"), use_container_width=True)
+
+
+def compute_d28(df_sepe: pd.DataFrame, display_muni: str, year: int, month_num: int = 9):
+    """
+    Calcula D.28.* a partir del parquet SEPE para un municipio y año dados,
+    tomando como referencia el mes 'month_num' (por defecto septiembre=9).
+
+    Devuelve: dict con n_total, n_25_44, n_mujer y flags de disponibilidad.
+    """
+    # 1) Filtrado municipio (misma lógica que usas para evitar duplicados)
+    dfp = subset_muni_first(df_sepe, display_muni)
+    dfp = dfp[(dfp.get("tipo") == "p") & (dfp["anio"] == year) & (dfp["mes_num"] == month_num)].copy()
+    if dfp.empty:
+        return {"n_total": None, "n_25_44": None, "n_mujer": None}
+
+    # 2) Asegura numéricos
+    need_cols = ["pTotal","pH2544","pM2544","pM25","pM45"]
+    for c in need_cols:
+        if c in dfp.columns:
+            dfp[c] = pd.to_numeric(dfp[c], errors="coerce").fillna(0)
+        else:
+            dfp[c] = 0
+
+    # 3) Quédate con UNA fila por mes (por si acaso)
+    dfp = keep_one_per_month(dfp, prefer="first")
+
+    # 4) Cálculos
+    n_total  = float(dfp["pTotal"].iloc[0]) if "pTotal" in dfp.columns and not dfp.empty else None
+    n_25_44  = float(dfp["pH2544"].iloc[0] + dfp["pM2544"].iloc[0]) if not dfp.empty else None
+    n_mujer  = float((dfp["pM25"].iloc[0] + dfp["pM2544"].iloc[0] + dfp["pM45"].iloc[0])) if not dfp.empty else None
+
+    return {"n_total": n_total, "n_25_44": n_25_44, "n_mujer": n_mujer}
 
 
 
@@ -618,6 +869,18 @@ with tab1:
             for year in YEARS:
                 pop_variation_dict[year] = None
 
+        # === SEPE para D.26 y D.28 (carga una sola vez) ===
+        try:
+            parquet_path_for_d26 = st.session_state.get("sepe_parquet_path", "sepe_global.parquet")
+            df_sepe_all = load_sepe_parquet(parquet_path_for_d26)
+            sector_year_df = sector_shares_by_year(df_sepe_all, selected_muni, debug=False)
+        except Exception as e:
+            st.warning(f"No se pudieron calcular D.26 desde SEPE: {e}")
+            sector_year_df = pd.DataFrame()
+            df_sepe_all = None
+
+
+
         for year in YEARS:
             total = pop_df.get(f"total_total_total_{year}", pd.Series([0])).values[0]
             over_65 = pop_df[[f"total_{age}_total_{year}" for age in age_65_plus if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
@@ -658,7 +921,7 @@ with tab1:
                 "D.24.a. Dependencia total (%)": round((pop_0_14 + over_65) / pop_15_64 * 100, 2) if pop_15_64 else None,
                 "D.24.b. Dependencia infantil (%)": round(pop_0_14 / pop_15_64 * 100, 2) if pop_15_64 else None,
                 "D.24.c. Dependencia mayores (%)": round(over_65 / pop_15_64 * 100, 2) if pop_15_64 else None,
-                "D.25 Viviendas por persona": None,
+                "D.29 Viviendas por persona": None,
                 "D.32 Variación hogares 2011-2021 (%)": var_hogares_pct if year == "2021" else None,
                 "D.33 Crecimiento parque viviendas 2011-2021 (%)": crecimiento_viviendas_pct if year == "2021" else None,
                 "D.34 Vivienda secundaria (%)": None,
@@ -767,10 +1030,47 @@ with tab1:
             except:
                 row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
 
+
+
+            # --- D.26: % trabajadores por sector (media anual SEPE Contratos) ---
+            vals = sector_year_df[sector_year_df["anio"] == int(year)]
+            if not vals.empty:
+                row["D.26.a. Trabajadores en sector agricultura (%)"]  = vals.iloc[0]["agr_avg"]
+                row["D.26.b. Trabajadores en sector industria (%)"]    = vals.iloc[0]["ind_avg"]
+                row["D.26.c. Trabajadores en sector construcción (%)"] = vals.iloc[0]["con_avg"]
+                row["D.26.d. Trabajadores en sector servicios (%)"]    = vals.iloc[0]["ser_avg"]
+            else:
+                row["D.26.a. Trabajadores en sector agricultura (%)"]  = None
+                row["D.26.b. Trabajadores en sector industria (%)"]    = None
+                row["D.26.c. Trabajadores en sector construcción (%)"] = None
+                row["D.26.d. Trabajadores en sector servicios (%)"]    = None
+
+            # --- D.28 (SEPTIEMBRE) ---
+            # Si SOLO quieres 2024, deja la condición del año. Si lo quieres para todos los años, quita el 'and int(year) == 2024'.
+            d28a = d28b = d28c = None
+            if df_sepe_all is not None:  # and int(year) == 2024:
+                d28 = compute_d28(df_sepe_all, selected_muni, int(year), month_num=9)
+                n_total  = d28.get("n_total")
+                n_25_44  = d28.get("n_25_44")
+                n_mujer  = d28.get("n_mujer")
+            
+                if n_total and pop_15_64:  # evita divisiones por 0/None
+                    d28a = round(n_total / pop_15_64 * 100, 2)
+                if n_total:
+                    d28b = round(n_25_44 / n_total * 100, 2) if n_25_44 is not None else None
+                    d28c = round(n_mujer / n_total * 100, 2)   if n_mujer is not None else None
+            
+            row["D.28.a. Porcentaje de parados total (%)"] = d28a
+            row["D.28.b. Porcentaje de parados entre 25 y 44 años (%)"] = d28b
+            row["D.28.c. Porcentaje de paro femenino (%)"] = d28c
+
+
+
+
             results.append(row)
 
         results_df = pd.DataFrame(results)
-        import re
+       
 
         # Ordenar columnas por el número después de "D."
         def get_d_number(col):
@@ -799,6 +1099,19 @@ with tab1:
         with col2:
             show_map = st.toggle("🗺️ Mostrar/Ocultar Mapa del Municipio", value=False)
       
+        # Comparativa septiembre (foto del año) – solo para información
+        if selected_muni and 'sector_year_df' in locals() and not sector_year_df.empty:
+            comp_sep = (sector_year_df[["anio","agr_sep","ind_sep","con_sep","ser_sep"]]
+                        .rename(columns={
+                            "anio":"Año",
+                            "agr_sep":"Sept. Agricultura (%)",
+                            "ind_sep":"Sept. Industria (%)",
+                            "con_sep":"Sept. Construcción (%)",
+                            "ser_sep":"Sept. Servicios (%)"
+                        })
+                        .sort_values("Año"))
+            st.caption("📌 Comparativa de **septiembre** por año (referencia, la tabla principal usa la **media anual**):")
+            st.dataframe(comp_sep, use_container_width=True, hide_index=True)
 
         if selected_muni and gdf_muni is not None and show_map:
             st.markdown("### 🗺️ Mapa del Municipio con Recortes SIU")
@@ -927,9 +1240,13 @@ with tab1:
 
 st.markdown("## 📈 Evolución temporal SEPE (paro y contratos)")
 parquet_path = st.text_input("Ruta parquet SEPE", value="sepe_global.parquet")
+st.session_state["sepe_parquet_path"] = parquet_path
 
 try:
+    
     df_sepe = load_sepe_parquet(parquet_path)
+    if selected_muni:
+        df_sepe = subset_muni_first(df_sepe, selected_muni)
     if selected_muni:
         ts_paro, ts_cont = build_timeseries(df_sepe, selected_muni)
 
@@ -978,6 +1295,18 @@ try:
 
 except Exception as e:
     st.error(f"❌ Error con el parquet SEPE: {e}")
+
+with st.expander("🔎 Depuración D.26 — contratos por sector (valores brutos y %)", expanded=False):
+    try:
+        # Usa la misma ruta que el text input de abajo, o fija aquí la ruta
+        parquet_path_for_d26 = st.session_state.get("sepe_parquet_path", "sepe_global.parquet")
+        df_sepe_all = load_sepe_parquet(parquet_path_for_d26)
+        show_d26_debug(df_sepe_all, selected_muni)
+    except Exception as e:
+        st.error(f"No se pudo generar la depuración D.26: {e}")
+
+
+
 
 
 st.markdown("---")
