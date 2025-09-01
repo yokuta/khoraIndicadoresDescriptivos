@@ -396,6 +396,79 @@ def load_municipio_geojson_by_code(municipio, df):
         st.warning(f"⚠️ Error leyendo GeoJSON de {municipio}: {e}")
         return None
 
+
+
+# === PARO & CONTRATOS DESDE PARQUET GLOBAL ===
+import unicodedata, re
+import numpy as np
+import pandas as pd
+
+def normalize_muni(name: str) -> str:
+    """Quita código si viene '28079 Madrid', elimina tildes y pasa a MAYÚSCULAS."""
+    if pd.isna(name):
+        return None
+    s = str(name).strip()
+    m = re.match(r"^\s*\d+\s+(.+)$", s)   # quita CPRO+CMUN si aparece
+    if m:
+        s = m.group(1)
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    return " ".join(s.upper().split())
+
+@st.cache_data
+def load_sepe_parquet(path="sepe_global.parquet"):
+    df = pd.read_parquet(path)
+
+    # --- Unificar a una columna muni y crear muni_norm ---
+    if "pMunicipio" in df.columns or "cMunicipio" in df.columns:
+        df["muni"] = np.where(
+            df.get("pMunicipio").notna() if "pMunicipio" in df.columns else False,
+            df.get("pMunicipio"),
+            df.get("cMunicipio")
+        )
+        df["muni_norm"] = df["muni"].apply(normalize_muni)
+    else:
+        raise ValueError("El parquet SEPE no tiene columnas de municipio (pMunicipio/cMunicipio).")
+
+    # --- Normalizar mes y construir fecha ---
+    mes_map = {
+        "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+        "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,
+        "noviembre":11,"diciembre":12
+    }
+    df["mes_norm"] = df["mes"].astype(str).str.strip().str.lower()
+    df["mes_num"]  = df["mes_norm"].map(mes_map)
+    df = df[df["mes_num"].notna()]  # por si hubiera meses raros
+    df["fecha"] = pd.to_datetime(dict(year=df["anio"].astype(int), month=df["mes_num"].astype(int), day=1))
+
+    return df
+
+def build_timeseries(df_sepe: pd.DataFrame, display_muni: str):
+    target = normalize_muni(display_muni)
+
+    # --- PARO ---
+    if "tipo" in df_sepe.columns:
+        df_paro = df_sepe[(df_sepe["tipo"]=="p") & (df_sepe["muni_norm"]==target)].copy()
+    else:
+        df_paro = df_sepe[df_sepe["muni_norm"]==target].filter(regex=r"^p|fecha").copy()
+    ts_paro = pd.DataFrame()
+    if "pTotal" in df_paro.columns:
+        ts_paro = (df_paro.groupby("fecha", as_index=False)["pTotal"].sum()
+                          .sort_values("fecha"))
+
+    # --- CONTRATOS ---
+    if "tipo" in df_sepe.columns:
+        df_cont = df_sepe[(df_sepe["tipo"]=="c") & (df_sepe["muni_norm"]==target)].copy()
+    else:
+        df_cont = df_sepe[df_sepe["muni_norm"]==target].filter(regex=r"^c|fecha").copy()
+    ts_cont = pd.DataFrame()
+    if "cTotal" in df_cont.columns:      # <-- nombre correcto
+        ts_cont = (df_cont.groupby("fecha", as_index=False)["cTotal"].sum()
+                          .sort_values("fecha"))
+
+    return ts_paro, ts_cont
+
+
+
 # -------------------- MAIN APP --------------------
 st.title("📊 Indicadores INE por Municipio")
 
@@ -442,7 +515,7 @@ with tab1:
 
     with col2:
         if selected_muni:
-            st.markdown("### ℹ️ Información Eje")
+            st.markdown("### ℹ️ Información:")
             st.info(f"**Municipio seleccionado:**\n{selected_muni}")
             try:
                 total_pop_2024 = df[df["municipio"] == selected_muni]["total_total_total_2024"].values[0]
@@ -670,7 +743,7 @@ with tab1:
                     v_nop = censo_df["viviendasNoP"].values[0]
                     pop_2021 = pop_df["total_total_total_2021"].values[0]
                     row["D.34 Vivienda secundaria (%)"] = round((v_nop / v_total) * 100, 2)
-                    row["D.25 Viviendas por persona"] = round((v_total / pop_2021) * 1000, 4)
+                    row["D.29 Viviendas por persona"] = round((v_total / pop_2021) * 1000, 4)       
                 except:
                     pass
             
@@ -851,6 +924,61 @@ with tab1:
             st.metric("Años de Datos", len(YEARS))
         with col3:
             st.metric("Indicadores", "15")
+
+st.markdown("## 📈 Evolución temporal SEPE (paro y contratos)")
+parquet_path = st.text_input("Ruta parquet SEPE", value="sepe_global.parquet")
+
+try:
+    df_sepe = load_sepe_parquet(parquet_path)
+    if selected_muni:
+        ts_paro, ts_cont = build_timeseries(df_sepe, selected_muni)
+
+        colA, colB = st.columns(2)
+        with colA:
+            st.subheader("Paro total")
+            if not ts_paro.empty:
+                st.line_chart(ts_paro.set_index("fecha"))
+            else:
+                st.info("No hay datos de paro para este municipio en el parquet.")
+
+        with colB:
+            st.subheader("Contratos totales")
+            if not ts_cont.empty:
+                st.line_chart(ts_cont.set_index("fecha"))
+            else:
+                st.info("No hay datos de contratos para este municipio en el parquet.")
+
+        with st.expander("Ver desgloses (si existen en el parquet)"):
+            muni_norm_target = normalize_muni(selected_muni)
+
+            posibles_p = ["pSAgricultura","pSIndustria","pSConstruccion","pSServicios","pSSinEmpleo",
+                          "pH25","pH2544","pH45","pM25","pM2544","pM45"]
+            cols_presentes_p = [c for c in posibles_p if c in df_sepe.columns]
+            if cols_presentes_p:
+                dfp = (df_sepe[(df_sepe.get("tipo")=="p") & (df_sepe["muni_norm"]==muni_norm_target)]
+                       [["fecha"]+cols_presentes_p]
+                       .groupby("fecha", as_index=False).sum().sort_values("fecha"))
+                st.write("Paro - desgloses")
+                st.dataframe(dfp.tail(12), use_container_width=True)
+            else:
+                st.caption("No se encontraron columnas de desglose de paro.")
+
+            posibles_c = ["cSAgricultura","cSIndustria","cSConstruccion","cSServicios",
+                          "cHInicIndefinido","cHTemporal","cHConvertIndefinido",
+                          "cMInicIndefinido","cMTemporal","cMConvertIndefinido"]
+            cols_presentes_c = [c for c in posibles_c if c in df_sepe.columns]
+            if cols_presentes_c:
+                dfc = (df_sepe[(df_sepe.get("tipo")=="c") & (df_sepe["muni_norm"]==muni_norm_target)]
+                       [["fecha"]+cols_presentes_c]
+                       .groupby("fecha", as_index=False).sum().sort_values("fecha"))
+                st.write("Contratos - desgloses")
+                st.dataframe(dfc.tail(12), use_container_width=True)
+            else:
+                st.caption("No se encontraron columnas de desglose de contratos.")
+
+except Exception as e:
+    st.error(f"❌ Error con el parquet SEPE: {e}")
+
 
 st.markdown("---")
 st.markdown("""
