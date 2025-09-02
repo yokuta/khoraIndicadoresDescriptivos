@@ -11,1325 +11,1341 @@ from shapely.geometry import Point, Polygon
 import matplotlib.pyplot as plt
 from sqlalchemy import create_engine
 import unicodedata, re, numpy as np
+# --- DEBUG ARRANQUE: mostrar trazas en pantalla y logs ---
+import streamlit as st
+import traceback, sys, os
+st.set_page_config(page_title="Indicadores Khôra", layout="wide")
 
 
-# -------------------- PAGE CONFIG --------------------
-st.set_page_config(
-    page_title="Indicadores INE por Municipio",
-    page_icon="🌆",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-# -------------------- DATABASE CONNECTION --------------------
-@st.cache_resource
-def get_db_connection():
-    """Create database connection"""
-    try:
-        db_url = st.secrets["postgres"]["db_url"]
-        engine = create_engine(db_url)
-        return engine
-    except Exception as e:
-        st.error(f"❌ Error conectando a la base de datos: {e}")
-        st.stop()
-
-# -------------------- GEOSPATIAL FUNCTIONS --------------------
-def process_shapefile(uploaded_file):
-    """Process uploaded shapefile (zip) and return GeoDataFrame"""
-    try:
-        # Create a temporary directory
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Extract the zip file
-            with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-            
-            # Find the .shp file
-            shp_file = None
-            for file in os.listdir(temp_dir):
-                if file.endswith('.shp'):
-                    shp_file = os.path.join(temp_dir, file)
-                    break
-            
-            if shp_file is None:
-                st.error("❌ No se encontró archivo .shp en el ZIP")
-                return None
-            
-            # Read the shapefile
-            gdf = gpd.read_file(shp_file)
-            return gdf
-            
-    except Exception as e:
-        st.error(f"❌ Error procesando shapefile: {str(e)}")
-        return None
-
-def process_geojson(uploaded_file):
-    """Process uploaded GeoJSON file and return GeoDataFrame"""
-    try:
-        gdf = gpd.read_file(uploaded_file)
-        return gdf
-    except Exception as e:
-        st.error(f"❌ Error procesando GeoJSON: {str(e)}")
-        return None
-
-def display_geodata_info(gdf, filename):
-    """Display information about the GeoDataFrame"""
-    st.success(f"✅ Datos geoespaciales cargados: **{filename}**")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Geometrías", len(gdf))
-    with col2:
-        st.metric("Columnas", len(gdf.columns))
-    with col3:
-        st.metric("CRS", str(gdf.crs) if gdf.crs else "No definido")
-    with col4:
-        geom_types = gdf.geometry.geom_type.unique()
-        st.metric("Tipo geometría", ", ".join(geom_types))
-    
-    # Show attribute table - remove ALL geometry-related columns
-    st.subheader("📋 Tabla de Atributos")
-    display_df = gdf.copy()
-    
-    # Remove all potential geometry columns
-    geom_cols_to_remove = ['geometry', 'geom', 'geom_wkt']
-    for col in geom_cols_to_remove:
-        if col in display_df.columns:
-            display_df = display_df.drop(columns=[col])
-    
-    st.dataframe(display_df.head(10), use_container_width=True)
-    
-    # Show bounds
-    bounds = gdf.total_bounds
-    st.subheader("🗺️ Extensión Geográfica")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write(f"**Min X (Oeste):** {bounds[0]:.6f}")
-        st.write(f"**Min Y (Sur):** {bounds[1]:.6f}")
-    with col2:
-        st.write(f"**Max X (Este):** {bounds[2]:.6f}")
-        st.write(f"**Max Y (Norte):** {bounds[3]:.6f}")
-
-def create_folium_map(gdf, map_title="Mapa"):
-    """Create a Folium map from GeoDataFrame"""
-    # Ensure CRS is WGS84 for web mapping
-    if gdf.crs != 'EPSG:4326':
-        gdf_web = gdf.to_crs('EPSG:4326')
-    else:
-        gdf_web = gdf.copy()
-    
-    # Calculate center
-    bounds = gdf_web.total_bounds
-    center_lat = (bounds[1] + bounds[3]) / 2
-    center_lon = (bounds[0] + bounds[2]) / 2
-    
-    # Create map
-    m = folium.Map(
-        location=[center_lat, center_lon],
-        zoom_start=8,
-        tiles='OpenStreetMap'
+def main():
+    st.write("App cargada. Preparando datos...")
+    # -------------------- PAGE CONFIG --------------------
+    st.set_page_config(
+        page_title="Indicadores INE por Municipio",
+        page_icon="🌆",
+        layout="wide",
+        initial_sidebar_state="collapsed"
     )
-    
-    # Add GeoDataFrame to map
-    folium.GeoJson(
-        gdf_web.__geo_interface__,
-        style_function=lambda feature: {
-            'fillColor': 'blue',
-            'color': 'black',
-            'weight': 2,
-            'fillOpacity': 0.3,
-        },
-        popup=folium.GeoJsonPopup(
-            fields=[col for col in gdf_web.columns if col != 'geometry']
-        )
 
-    ).add_to(m)
-    
-    return m
-
-def perform_spatial_clip(gdf_data, gdf_clip):
-    """Perform spatial clipping operation and recalculate area"""
-    try:
-        # Ensure both GDFs have valid CRS
-        if gdf_data.crs is None:
-            gdf_data.set_crs("EPSG:25830", inplace=True)
-        if gdf_clip.crs is None:
-            gdf_clip.set_crs("EPSG:25830", inplace=True)
-            
-        # Reproject to match
-        if gdf_data.crs != gdf_clip.crs:
-            gdf_data = gdf_data.to_crs(gdf_clip.crs)
-
-        # Perform clip
-        clipped_gdf = gpd.clip(gdf_data, gdf_clip)
-
-        if clipped_gdf.empty:
-            return None
-
-        # Recalculate area using WGS84 (like your working code)
-        clipped_wgs84 = clipped_gdf.to_crs(epsg=4326)
-        area_m2 = calculate_ellipsoidal_area(clipped_wgs84)
-        clipped_gdf["area_m2"] = area_m2
-        clipped_gdf["area_ha"] = [a / 10000 for a in area_m2]
-        clipped_gdf["estal"] = clipped_gdf["area_ha"]  # Keep compatibility with your code
-
-        return clipped_gdf
-
-    except Exception as e:
-        st.error(f"❌ Error en operación de recorte: {str(e)}")
-        return None
-
-def export_geodata(gdf, filename_base, format_type):
-    """Export GeoDataFrame to different formats"""
-    try:
-        if format_type == "GeoJSON":
-            geojson_str = gdf.to_json()
-            return geojson_str, f"{filename_base}.geojson", "application/json"
-        
-        elif format_type == "Shapefile":
-            # Create a temporary directory and zip file
-            with tempfile.TemporaryDirectory() as temp_dir:
-                shp_path = os.path.join(temp_dir, f"{filename_base}.shp")
-                gdf.to_file(shp_path)
-                
-                # Create zip file
-                zip_path = os.path.join(temp_dir, f"{filename_base}_shapefile.zip")
-                with zipfile.ZipFile(zip_path, 'w') as zipf:
-                    for file in os.listdir(temp_dir):
-                        if file.startswith(filename_base) and not file.endswith('.zip'):
-                            zipf.write(os.path.join(temp_dir, file), file)
-                
-                # Read zip file as bytes
-                with open(zip_path, 'rb') as f:
-                    zip_data = f.read()
-                
-                return zip_data, f"{filename_base}_shapefile.zip", "application/zip"
-        
-        elif format_type == "CSV":
-            # Convert to regular DataFrame (lose geometry)
-            df = pd.DataFrame(gdf.drop(columns=['geometry']))
-            csv_data = df.to_csv(index=False)
-            return csv_data, f"{filename_base}.csv", "text/csv"
-            
-    except Exception as e:
-        st.error(f"❌ Error exportando datos: {str(e)}")
-        return None, None, None
-
-def display_file_info(uploaded_file, df):
-    """Display information about the uploaded file"""
-    st.success(f"✅ Archivo cargado: **{uploaded_file.name}**")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Filas", len(df))
-    with col2:
-        st.metric("Columnas", len(df.columns))
-    with col3:
-        st.metric("Tamaño", f"{uploaded_file.size / 1024:.1f} KB")
-    
-    # Show basic info about the dataset
-    st.subheader("📋 Información del Dataset")
-    st.write("**Columnas:**")
-    st.write(", ".join(df.columns.tolist()))
-    
-    st.write("**Primeras 5 filas:**")
-    st.dataframe(df.head(), use_container_width=True)
-    
-    # Data types
-    st.write("**Tipos de datos:**")
-    dtype_df = pd.DataFrame({
-        'Columna': df.dtypes.index,
-        'Tipo': df.dtypes.values
-    })
-    st.dataframe(dtype_df, use_container_width=True, hide_index=True)
-    
-    # Basic statistics for numeric columns
-    numeric_cols = df.select_dtypes(include=['number']).columns
-    if len(numeric_cols) > 0:
-        st.write("**Estadísticas básicas (columnas numéricas):**")
-        st.dataframe(df[numeric_cols].describe(), use_container_width=True)
-    
-    # Check for missing values
-    missing_data = df.isnull().sum()
-    if missing_data.sum() > 0:
-        st.write("**Valores faltantes:**")
-        missing_df = pd.DataFrame({
-            'Columna': missing_data.index,
-            'Valores faltantes': missing_data.values,
-            'Porcentaje': (missing_data.values / len(df) * 100).round(2)
-        })
-        missing_df = missing_df[missing_df['Valores faltantes'] > 0]
-        st.dataframe(missing_df, use_container_width=True, hide_index=True)
-
-def process_uploaded_file(uploaded_file):
-    """Process the uploaded file and return a DataFrame"""
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            # Try different encodings for CSV
-            try:
-                df = pd.read_csv(uploaded_file, encoding='utf-8')
-            except UnicodeDecodeError:
-                try:
-                    uploaded_file.seek(0)  # Reset file pointer
-                    df = pd.read_csv(uploaded_file, encoding='latin-1')
-                except UnicodeDecodeError:
-                    uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, encoding='cp1252')
-        
-        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(uploaded_file)
-        
-        elif uploaded_file.name.endswith('.json'):
-            df = pd.read_json(uploaded_file)
-        
-        elif uploaded_file.name.endswith('.parquet'):
-            df = pd.read_parquet(uploaded_file)
-        
-        else:
-            st.error("❌ Formato de archivo no soportado. Use CSV, Excel, JSON o Parquet.")
-            return None
-            
-        return df
-        
-    except Exception as e:
-        st.error(f"❌ Error al procesar el archivo: {str(e)}")
-        return None
-
-from pyproj import Geod
-
-def calculate_ellipsoidal_area(gdf):
-    """Calculate ellipsoidal area (like QGIS $area) in m² using WGS84"""
-    geod = Geod(ellps="WGS84")
-
-    areas = []
-    for geom in gdf.geometry:
-        if geom is None or geom.is_empty:
-            areas.append(0)
-        else:
-            if geom.geom_type == "Polygon":
-                area, _ = geod.geometry_area_perimeter(geom)
-            elif geom.geom_type == "MultiPolygon":
-                area = sum(geod.geometry_area_perimeter(p)[0] for p in geom.geoms)
-            else:
-                area = 0
-            areas.append(abs(area))  # Ensure positive
-
-    return areas
-
-# -------------------- LOAD DATASETS --------------------
-@st.cache_data
-def load_data():
-    try:
-        df = pd.read_parquet("structured_population.parquet")
-        df.columns = df.columns.astype(str)
-        df_censo = pd.read_parquet("structured_censo.parquet")
-        df_hog_2011 = pd.read_parquet("structured_censo2011_hogares.parquet")
-        df_hog_2021 = pd.read_parquet("structured_censo2021_hogares.parquet")
-        df_censo2011 = pd.read_parquet("structured_censo2011_viviendas.parquet")
-        dgt_files = {
-            "2021": "dgt2021.parquet",
-            "2022": "dgt2022.parquet",
-            "2023": "dgt2023.parquet",
-            "2024": "dgt2024.parquet",
-        }
-        df_dgt_by_year = {}
-        for y, path in dgt_files.items():
-            try:
-                d = pd.read_parquet(path)
-                # clave de emparejamiento igual que usabas
-                d["municipio_completo"] = d["Código INE"].astype(str).str.zfill(5) + " " + d["Municipio"]
-                df_dgt_by_year[y] = d
-            except Exception:
-                df_dgt_by_year[y] = None  # si falta el fichero, evita fallar
-
-        return df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt_by_year
-    
-            
-    except Exception as e:
-        st.error(f"❌ No se pudieron cargar los archivos Parquet: {e}")
-        return None, None, None, None, None, None
-
-@st.cache_data
-def load_internal_bases_all_codsiu(selected_muni):
-    """Carga todos los CODSIU (1-20) para un municipio"""
-    try:
-        engine = get_db_connection()
-        query = """
-            SELECT * 
-            FROM dev_codeine.siu_siose_with_municipalities
-            WHERE municipality ILIKE %(municipality)s
-              AND "CODSIU" BETWEEN 1 AND 20
-        """
-        with engine.connect() as conn:
-            gdf_all = gpd.read_postgis(query, conn, geom_col="geom", params={
-                "municipality": f"%{selected_muni}%"
-            })
-        return gdf_all
-    except Exception as e:
-        st.error(f"❌ Error cargando capas base desde PostgreSQL: {e}")
-        return None
-
-
-
-from pathlib import Path
-
-@st.cache_data
-def load_municipio_geojson_by_code(municipio, df):
-    """Carga GeoJSON usando el código INE del municipio"""
-    try:
-        code_ine = df[df["municipio"] == municipio]["municipio"].astype(str).str.zfill(5).values[0]
-    except IndexError:
-        st.warning(f"No se encontró código INE para el municipio '{municipio}'")
-        return None
-
-    # Buscar el archivo que empieza por ese código
-    folder = Path("geojson_municipios")
-    matching_files = list(folder.glob(f"{code_ine}*.geojson"))
-
-    if not matching_files:
-        st.warning(f"⚠️ No se encontró un GeoJSON para el código INE {code_ine}")
-        return None
-
-    try:
-        return gpd.read_file(matching_files[0])
-    except Exception as e:
-        st.warning(f"⚠️ Error leyendo GeoJSON de {municipio}: {e}")
-        return None
-
-
-
-# === PARO & CONTRATOS DESDE PARQUET GLOBAL ===
-
-def normalize_muni(name: str) -> str:
-    """Quita código si viene '28079 Madrid', elimina tildes y pasa a MAYÚSCULAS."""
-    if pd.isna(name):
-        return None
-    s = str(name).strip()
-    m = re.match(r"^\s*\d+\s+(.+)$", s)
-    if m:
-        s = m.group(1)
-    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-    return " ".join(s.upper().split())
-
-@st.cache_data
-def load_sepe_parquet(path="sepe_global.parquet"):
-    df = pd.read_parquet(path)
-
-    # Unificar municipio y normalizar mes
-    if "pMunicipio" in df.columns or "cMunicipio" in df.columns:
-        df["muni"] = df.get("pMunicipio").fillna(df.get("cMunicipio"))
-        df["muni_norm"] = df["muni"].apply(normalize_muni)
-    else:
-        raise ValueError("El parquet SEPE no tiene columnas de municipio (pMunicipio/cMunicipio).")
-
-    mes_map = {
-        "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-        "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,
-        "noviembre":11,"diciembre":12
-    }
-    df["mes_norm"] = df["mes"].astype(str).str.strip().str.lower()
-    df["mes_num"]  = df["mes_norm"].map(mes_map)
-    df = df[df["mes_num"].notna()].copy()
-    df["anio"] = df["anio"].astype(int)
-    df["fecha"] = pd.to_datetime(dict(year=df["anio"], month=df["mes_num"].astype(int), day=1))
-
-    # >>> NUEVO: preservar orden original para "primera coincidencia"
-    df["row_order"] = df.reset_index().index
-
-    return df
-
-
-def subset_muni_first(df: pd.DataFrame, display_muni: str) -> pd.DataFrame:
-    """
-    Devuelve solo las filas del municipio (muni_norm) quedándose con
-    el PRIMER valor crudo de 'muni' que aparece en el parquet (por row_order).
-    Útil cuando 'SORIA' aparece como municipio y luego como provincia.
-    """
-    target = normalize_muni(display_muni)
-    if "muni_norm" not in df.columns:
-        return df.iloc[0:0].copy()
-
-    # Filtra por el normalizado y orden original
-    cand = df[df["muni_norm"] == target].copy()
-    if "row_order" in cand.columns:
-        cand = cand.sort_values("row_order")
-    if cand.empty:
-        return cand
-
-    # Primer 'muni' crudo que aparece para ese muni_norm
-    first_raw = cand["muni"].dropna().iloc[0]
-
-    # Mantén solo ese 'muni' crudo
-    filtered = df[(df["muni_norm"] == target) & (df["muni"] == first_raw)].copy()
-
-    # Mensaje útil si hubo más de un crudo distinto
-    other_raws = cand["muni"].dropna().unique().tolist()
-    if len(set(other_raws)) > 1:
-        st.caption(f"🔎 Coincidencias múltiples para **{display_muni}**: {other_raws}. "
-                   f"Usando la primera: **{first_raw}**")
-
-    return filtered
-
-
-def build_timeseries(df_sepe: pd.DataFrame, display_muni: str):
-    target = normalize_muni(display_muni)
-    df_muni = subset_muni_first(df_sepe, display_muni)
-    # --- PARO ---
-    if "tipo" in df_sepe.columns:
-        df_paro = df_sepe[(df_sepe["tipo"]=="p") & (df_sepe["muni_norm"]==target)].copy()
-    else:
-        df_paro = df_sepe[df_sepe["muni_norm"]==target].filter(regex=r"^p|fecha").copy()
-    ts_paro = pd.DataFrame()
-    if "pTotal" in df_paro.columns:
-        ts_paro = (df_paro.groupby("fecha", as_index=False)["pTotal"].sum()
-                          .sort_values("fecha"))
-
-    # --- CONTRATOS ---
-    if "tipo" in df_sepe.columns:
-        df_cont = df_sepe[(df_sepe["tipo"]=="c") & (df_sepe["muni_norm"]==target)].copy()
-    else:
-        df_cont = df_sepe[df_sepe["muni_norm"]==target].filter(regex=r"^c|fecha").copy()
-    ts_cont = pd.DataFrame()
-    if "cTotal" in df_cont.columns:      # <-- nombre correcto
-        ts_cont = (df_cont.groupby("fecha", as_index=False)["cTotal"].sum()
-                          .sort_values("fecha"))
-
-    return ts_paro, ts_cont
-
-def _sector_percentages_from_row(row) -> pd.Series:
-    tot = float(row.get("cTotal", 0) or 0)
-    if tot <= 0 or pd.isna(tot):
-        return pd.Series([None]*4, index=["agr","ind","con","ser"])
-    return pd.Series([
-        round(row.get("cSAgricultura", 0)/tot*100, 2),
-        round(row.get("cSIndustria", 0)/tot*100, 2),
-        round(row.get("cSConstruccion", 0)/tot*100, 2),
-        round(row.get("cSServicios", 0)/tot*100, 2),
-    ], index=["agr","ind","con","ser"])
-
-
-def sector_shares_by_year(df_sepe: pd.DataFrame, display_muni: str, debug: bool=False) -> pd.DataFrame:
-    target = normalize_muni(display_muni)
-
-    # 1) Filtra CONTRATOS del municipio y fija un único "muni" crudo
-    dfc_all = subset_muni_first(df_sepe, display_muni)
-    dfc = dfc_all[dfc_all.get("tipo") == "c"].copy()
-    if dfc.empty:
-        if debug: st.info("D.26: no hay filas para este municipio.")
-        return pd.DataFrame(columns=[
-            "anio","agr_avg","ind_avg","con_avg","ser_avg","agr_sep","ind_sep","con_sep","ser_sep"
-        ])
-
-    # 2) Asegura numéricos
-    cols = ["cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]
-    for c in cols:
-        if c in dfc.columns:
-            dfc[c] = pd.to_numeric(dfc[c], errors="coerce").fillna(0)
-        else:
-            dfc[c] = 0
-
-    # 3) Quedarse con UNA fila por (anio, mes_num) usando el orden original si existe
-    if "row_order" not in dfc.columns:
-        dfc["row_order"] = dfc.reset_index().index
-
-    # Ordena por año, mes y orden original; luego elimina duplicados por (anio, mes_num)
-    dfc_clean = (dfc.sort_values(["anio","mes_num","row_order"])
-                   .drop_duplicates(subset=["anio","mes_num"], keep="first")
-                   .copy())
-
-    # 4) Construir "monthly" DESDE LOS BRUTOS (ya depurados a 1 fila por mes)
-    #    (groupby + sum no cambia los valores porque ya hay 1 fila por mes, pero lo dejamos por seguridad)
-    monthly = (dfc_clean.groupby(["anio","mes_num"], as_index=False)[cols].sum())
-
-    # 5) % mensuales por sector
-    monthly["agr_pct"] = (monthly["cSAgricultura"] / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
-    monthly["ind_pct"] = (monthly["cSIndustria"]   / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
-    monthly["con_pct"] = (monthly["cSConstruccion"]/ monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
-    monthly["ser_pct"] = (monthly["cSServicios"]   / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
-
-    # 6) MEDIA anual (promedio simple de los % mensuales)
-    year_avg = (monthly.groupby("anio", as_index=False)[["agr_pct","ind_pct","con_pct","ser_pct"]]
-                        .mean().round(2)
-                        .rename(columns={
-                            "agr_pct":"agr_avg","ind_pct":"ind_avg",
-                            "con_pct":"con_avg","ser_pct":"ser_avg"
-                        }))
-
-    # 7) SEPTIEMBRE: % solo para mes 9
-    sep = (monthly[monthly["mes_num"]==9][["anio","agr_pct","ind_pct","con_pct","ser_pct"]]
-           .rename(columns={
-               "agr_pct":"agr_sep","ind_pct":"ind_sep",
-               "con_pct":"con_sep","ser_pct":"ser_sep"
-           }).round(2))
-
-    out = year_avg.merge(sep, on="anio", how="left")
-
-    # 8) Debug opcional mostrando EXACTAMENTE los datos depurados
-    if debug:
-        st.subheader("🧪 D.26 DEBUG – % mensuales y medias anuales (desde brutos depurados)")
-        st.caption("Brutos depurados a 1 fila por mes (dfc_clean):")
-        cols_dbg = ["anio","mes_num","muni","archivo","sheet_name"] + cols
-        cols_dbg = [c for c in cols_dbg if c in dfc_clean.columns]
-        st.dataframe(dfc_clean.sort_values(["anio","mes_num"])[cols_dbg],
-                     use_container_width=True)
-
-        st.caption("Matriz mensual (tras depurar → 1 fila/mes y calcular %):")
-        st.dataframe(monthly.sort_values(["anio","mes_num"])[
-            ["anio","mes_num","cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios",
-             "agr_pct","ind_pct","con_pct","ser_pct"]
-        ], use_container_width=True)
-
-        st.caption("Medias anuales de % + septiembre:")
-        dbg = out.copy()
-        dbg["sum_%_avg"] = dbg[["agr_avg","ind_avg","con_avg","ser_avg"]].sum(axis=1).round(2)
-        st.dataframe(dbg.sort_values("anio"), use_container_width=True)
-
-    return out
-
-
-def keep_one_per_month(df: pd.DataFrame, prefer: str = "first") -> pd.DataFrame:
-    """
-    Devuelve una única fila por (anio, mes_num).
-    prefer = "first"  -> usa el orden original (row_order) si existe.
-    prefer = "min"    -> usa la fila con menor cTotal (si existe cTotal).
-    """
-    key = ["anio", "mes_num"]
-    tmp = df.copy()
-
-    if prefer == "min" and "cTotal" in tmp.columns:
-        tmp = (tmp.sort_values(key + ["cTotal"])
-                  .drop_duplicates(subset=key, keep="first"))
-    else:
-        extra = ["row_order"] if "row_order" in tmp.columns else []
-        tmp = (tmp.sort_values(key + extra)
-                  .drop_duplicates(subset=key, keep="first"))
-    return tmp
-
-
-def show_d26_debug(df_sepe: pd.DataFrame, display_muni: str):
-    """
-    Depuración de D.26 para un municipio:
-      - Bruto mensual (filas originales)
-      - Agregado por mes (sumas y %)
-      - Agregado anual (sumas y %)
-      - Septiembre (sumas y %)
-      - Conteo de filas por mes (posibles duplicados)
-    """
-    
-
-    # 1) filtra CONTRATOS y aplica "quédate con el primer municipio crudo"
-    dfc_all = df_sepe[df_sepe.get("tipo") == "c"].copy()
-    dfc = subset_muni_first(dfc_all, display_muni)   # <<--- AQUÍ se fuerza el primero
-    if dfc.empty:
-        st.warning("No hay registros de CONTRATOS para este municipio en el parquet.")
-        return
-
-    # 2) asegura tipos numéricos
-    cols = ["cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]
-    for c in cols:
-        dfc[c] = pd.to_numeric(dfc[c], errors="coerce")
-    dfc[cols] = dfc[cols].fillna(0)
-
-    # 3) selector de año
-    years = sorted(dfc["anio"].dropna().astype(int).unique())
-    year_sel = st.selectbox("Año (depuración D.26)", years, index=len(years)-1)
-    dfc_y = dfc[dfc["anio"] == year_sel].copy()
-    dfc_y = keep_one_per_month(dfc_y, prefer="first")
-
-    # --- (1) bruto mensual
-    st.subheader("🔢 Bruto mensual (filas originales)")
-    raw_cols = ["anio","mes_num","mes","fecha","muni","archivo","sheet_name"] + cols
-    raw_cols = [c for c in raw_cols if c in dfc_y.columns]
-    df_raw = dfc_y[raw_cols].copy()
-
-    sec_cols = [c for c in ["cSAgricultura","cSIndustria","cSConstruccion","cSServicios"] if c in df_raw.columns]
-    if sec_cols:
-        df_raw["sum_sectores"] = df_raw[sec_cols].sum(axis=1)
-        df_raw["gap_total_minus_sect"] = df_raw.get("cTotal", 0) - df_raw["sum_sectores"]
-        if "cSAgricultura" in df_raw.columns and "cTotal" in df_raw.columns:
-            df_raw["%Agr_fila"] = (df_raw["cSAgricultura"] / df_raw["cTotal"] * 100)\
-                                    .replace([np.inf, -np.inf], np.nan).round(2)
-    st.dataframe(df_raw.sort_values(["anio","mes_num"]), use_container_width=True)
-
-    # --- (2) agregado por mes
-    st.subheader("📦 Agregado por mes (sumas y %)")
-    gb = (dfc_y.groupby(["anio","mes_num","mes"], as_index=False)[cols].sum())
-    gb["sum_sectores"] = gb[["cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]].sum(axis=1)
-    gb["gap_total_minus_sect"] = gb["cTotal"] - gb["sum_sectores"]
-    gb["%Agr"] = (gb["cSAgricultura"] / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
-    gb["%Ind"] = (gb["cSIndustria"]   / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
-    gb["%Con"] = (gb["cSConstruccion"]/ gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
-    gb["%Ser"] = (gb["cSServicios"]   / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
-    st.dataframe(gb.sort_values("mes_num"), use_container_width=True)
-
-    # --- (3) agregado anual
-    st.subheader("🧮 Agregado ANUAL (sumas del año y %)")
-    annual = dfc_y[cols].sum().to_frame("valor").T
-    annual.insert(0, "anio", year_sel)
-    annual["%Agr"] = (annual["cSAgricultura"] / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
-    annual["%Ind"] = (annual["cSIndustria"]   / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
-    annual["%Con"] = (annual["cSConstruccion"]/ annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
-    annual["%Ser"] = (annual["cSServicios"]   / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
-    st.dataframe(annual, use_container_width=True)
-
-    # --- (4) septiembre
-    st.subheader("📌 SEPTIEMBRE (sumas de septiembre y %)")
-    sep = dfc_y[dfc_y["mes_num"] == 9][cols].sum().to_frame("valor").T
-    sep.insert(0, "anio", year_sel)
-    sep["%Agr"] = (sep["cSAgricultura"] / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
-    sep["%Ind"] = (sep["cSIndustria"]   / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
-    sep["%Con"] = (sep["cSConstruccion"]/ sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
-    sep["%Ser"] = (sep["cSServicios"]   / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
-    st.dataframe(sep, use_container_width=True)
-
-    # --- (5) conteo filas por mes (ya sobre un único municipio crudo)
-    st.caption("🧩 Conteo de filas por mes (para detectar duplicados o múltiples filas por mes)")
-    cnt = dfc_y.groupby(["anio","mes_num"]).size().reset_index(name="n_filas")
-    st.dataframe(cnt.sort_values("mes_num"), use_container_width=True)
-
-
-def compute_d28(df_sepe: pd.DataFrame, display_muni: str, year: int, month_num: int = 9):
-    """
-    Calcula D.28.* a partir del parquet SEPE para un municipio y año dados,
-    tomando como referencia el mes 'month_num' (por defecto septiembre=9).
-
-    Devuelve: dict con n_total, n_25_44, n_mujer y flags de disponibilidad.
-    """
-    # 1) Filtrado municipio (misma lógica que usas para evitar duplicados)
-    dfp = subset_muni_first(df_sepe, display_muni)
-    dfp = dfp[(dfp.get("tipo") == "p") & (dfp["anio"] == year) & (dfp["mes_num"] == month_num)].copy()
-    if dfp.empty:
-        return {"n_total": None, "n_25_44": None, "n_mujer": None}
-
-    # 2) Asegura numéricos
-    need_cols = ["pTotal","pH2544","pM2544","pM25","pM45"]
-    for c in need_cols:
-        if c in dfp.columns:
-            dfp[c] = pd.to_numeric(dfp[c], errors="coerce").fillna(0)
-        else:
-            dfp[c] = 0
-
-    # 3) Quédate con UNA fila por mes (por si acaso)
-    dfp = keep_one_per_month(dfp, prefer="first")
-
-    # 4) Cálculos
-    n_total  = float(dfp["pTotal"].iloc[0]) if "pTotal" in dfp.columns and not dfp.empty else None
-    n_25_44  = float(dfp["pH2544"].iloc[0] + dfp["pM2544"].iloc[0]) if not dfp.empty else None
-    n_mujer  = float((dfp["pM25"].iloc[0] + dfp["pM2544"].iloc[0] + dfp["pM45"].iloc[0])) if not dfp.empty else None
-
-    return {"n_total": n_total, "n_25_44": n_25_44, "n_mujer": n_mujer}
-
-
-
-# -------------------- MAIN APP --------------------
-st.title("📊 Indicadores INE por Municipio")
-
-# Add tabs for different functionalities
-# Only one tab: Análisis INE
-tab1 = st.container()
-
-
-with tab1:
-    st.markdown("---")
-    
-    # Load original data
-    data_loaded = load_data()
-    if all(d is not None for d in data_loaded):
-        df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt_by_year = data_loaded
-
-    else:
-        st.error("❌ No se pudieron cargar los datos base del INE")
-        st.stop()
-
-    # Constants
-    YEARS = ["2024", "2023", "2022", "2021"]
-    age_65_plus = ["65_69", "70_74", "75_79", "80_84", "85_89", "90_94", "95_99", "100"]
-    age_85_plus = ["85_89", "90_94", "95_99", "100"]
-    ages_0_14 = ["0_4", "5_9", "10_14"]
-    ages_15_64 = ["15_19", "20_24", "25_29", "30_34", "35_39", "40_44", "45_49", "50_54", "55_59", "60_64"]
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.markdown("### 🏨️ Selección de Municipio")
-        municipalities = sorted(df["municipio"].dropna().unique(), key=str.lower)
-        search_term = st.text_input("🔍 Buscar municipio:", placeholder="Escribe para buscar un municipio...")
-
-        if search_term:
-            filtered_municipalities = [m for m in municipalities if search_term.lower() in m.lower()]
-            if filtered_municipalities:
-                selected_muni = st.selectbox("Municipios encontrados:", filtered_municipalities, index=None)
-            else:
-                st.warning("❌ No se encontraron municipios que coincidan con tu búsqueda.")
-                selected_muni = None
-        else:
-            selected_muni = st.selectbox("O selecciona directamente:", municipalities, index=None)
-
-    with col2:
-        if selected_muni:
-            st.markdown("### ℹ️ Información:")
-            st.info(f"**Municipio seleccionado:**\n{selected_muni}")
-            try:
-                total_pop_2024 = df[df["municipio"] == selected_muni]["total_total_total_2024"].values[0]
-                st.metric("Población Total 2024", f"{total_pop_2024:,}" if total_pop_2024 else "No disponible")
-            except:
-                pass
-
-    if selected_muni:
-        st.markdown("---")
-        pop_df = df[df["municipio"] == selected_muni]
-        with st.spinner("🔍 Procesando capa geográfica del municipio..."):
-            gdf_muni = load_municipio_geojson_by_code(selected_muni, df)
-            municipio_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
-            st.write(f"🟫 Superficie del municipio: {municipio_area_ha:,.2f} ha")
-
-            gdf_all_codsiu = load_internal_bases_all_codsiu(selected_muni)
-
-            # Recorte general para todos los CODSIU
-            if gdf_all_codsiu is not None:
-                gdf_all_clipped = perform_spatial_clip(gdf_all_codsiu, gdf_muni)
-                if gdf_all_clipped is not None and not gdf_all_clipped.empty:
-                    gdf_all_clipped["CODSIU"] = gdf_all_clipped["CODSIU"].astype(int)
-                    for cod in [9, 12, 14, 16, 18]:                        
-                        subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == cod]
-                        if not subset.empty:
-                            estal_sum = subset["estal"].sum()
-                            st.session_state[f"sup_cultivos_{cod:02d}"] = estal_sum
-                        else:
-                            st.session_state[f"sup_cultivos_{cod:02d}"] = None                                
-            else:
-                st.info("ℹ️ No se encontró geometría para este municipio o falló la carga.")
-
-        if pop_df.empty:
-            st.error("❌ No se encontraron datos para el municipio seleccionado.")
+    # -------------------- DATABASE CONNECTION --------------------
+    @st.cache_resource
+    def get_db_connection():
+        """Create database connection"""
+        try:
+            db_url = st.secrets["postgres"]["db_url"]
+            engine = create_engine(db_url)
+            return engine
+        except Exception as e:
+            st.error(f"❌ Error conectando a la base de datos: {e}")
             st.stop()
 
-        censo_df = df_censo[df_censo["Municipio de residencia"].str.contains(selected_muni, case=False, na=False)]
-
-        # Vivienda/hogar histórico
-        hog_2011 = df_hog_2011[df_hog_2011["municipio"].str.contains(selected_muni, case=False, na=False)]
-        hog_2021 = df_hog_2021[df_hog_2021["municipio"].str.contains(selected_muni, case=False, na=False)]
-        viv_2011 = df_censo2011[df_censo2011["Municipio de residencia"].str.contains(selected_muni, case=False, na=False)]
-
+    # -------------------- GEOSPATIAL FUNCTIONS --------------------
+    def process_shapefile(uploaded_file):
+        """Process uploaded shapefile (zip) and return GeoDataFrame"""
         try:
-            n_hog_2011 = hog_2011["nHogares"].values[0]
-            n_hog_2021 = hog_2021["nHogares"].values[0]
-            var_hogares_pct = round((n_hog_2021 - n_hog_2011) / n_hog_2011 * 100, 2)
-        except:
-            var_hogares_pct = None
-
-        try:
-            n_viv_2011 = viv_2011["viviendasTotal"].values[0]
-            n_viv_2021 = censo_df["viviendasT"].values[0]
-            crecimiento_viviendas_pct = round((n_viv_2021 - n_viv_2011) / n_viv_2011 * 100, 2)
-        except:
-            crecimiento_viviendas_pct = None
-
-        try:
-            n_viv_vacias_2011 = viv_2011["viviendasVacias"].values[0]
-            viv_vacia_pct_2011 = round(n_viv_vacias_2011 / n_viv_2011 * 100, 2)
-        except:
-            viv_vacia_pct_2011 = None
-
-
-    
-
-        # Result table
-        results = []
-
-        # -------------------- CALCULATE POPULATION VARIATION FOR EACH YEAR --------------------
-        pop_variation_dict = {}
-
-        try:
-            hist_df_raw = pd.read_parquet("population/poblacion_completa.parquet")
-            hist_df_raw.rename(columns={hist_df_raw.columns[0]: "municipio"}, inplace=True)
-            hist_row = hist_df_raw[hist_df_raw["municipio"].str.contains(selected_muni, case=False, na=False)]
-
-            if not hist_row.empty:
-                hist_row = hist_row.iloc[0]
-
-                def clean_series(series):
-                    return pd.to_numeric(series.replace(r"^\s*$", pd.NA, regex=True), errors="coerce")
-
-                pop_t = clean_series(hist_row.filter(like="_t")).dropna()
-                pop_years = [int(col.split("_")[0]) for col in pop_t.index]
-                pop_series = pd.Series(pop_t.values, index=pop_years).sort_index()
-
-                for year in YEARS:
-                    y = int(year)
-                    if y in pop_series.index and (y - 10) in pop_series.index:
-                        base = pop_series[y - 10]
-                        current = pop_series[y]
-                        pct = round((current - base) / base * 100, 2) if base else None
-                        pop_variation_dict[year] = pct
-                    else:
-                        pop_variation_dict[year] = None
-                    
-
-        except:
-            for year in YEARS:
-                pop_variation_dict[year] = None
-
-        # === SEPE para D.26 y D.28 (carga una sola vez) ===
-        try:
-            parquet_path_for_d26 = st.session_state.get("sepe_parquet_path", "sepe_global.parquet")
-            df_sepe_all = load_sepe_parquet(parquet_path_for_d26)
-            sector_year_df = sector_shares_by_year(df_sepe_all, selected_muni, debug=False)
-        except Exception as e:
-            st.warning(f"No se pudieron calcular D.26 desde SEPE: {e}")
-            sector_year_df = pd.DataFrame()
-            df_sepe_all = None
-
-
-
-        for year in YEARS:
-            total = pop_df.get(f"total_total_total_{year}", pd.Series([0])).values[0]
-            over_65 = pop_df[[f"total_{age}_total_{year}" for age in age_65_plus if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
-            over_85 = pop_df[[f"total_{age}_total_{year}" for age in age_85_plus if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
-            foreign = pop_df.get(f"total_total_EX_{year}", pd.Series([0])).values[0]
-            pop_0_14 = pop_df[[f"total_{age}_total_{year}" for age in ages_0_14 if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
-            pop_15_64 = pop_df[[f"total_{age}_total_{year}" for age in ages_15_64 if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
-
-             # --- Indicadores DGT por año ---
-            veh_1000hab, pct_turismos, pct_motos = None, None, None
-            try:
-                df_dgt_year = df_dgt_by_year.get(year)
-                if df_dgt_year is not None:
-                    dgt_row = df_dgt_year[df_dgt_year["municipio_completo"].str.lower() == selected_muni.lower()]
-                    if not dgt_row.empty:
-                        turismos = dgt_row["Parque Turismos"].values[0]
-                        motos = dgt_row["Parque Motocicletas"].values[0]
-                        total_veh = turismos + motos
-                        total_total = dgt_row["Parque Total"].values[0]
-                        pop_year = total
-                        if pop_year and (turismos is not None) and (motos is not None):
-                            veh_1000hab = round((turismos + motos) / pop_year * 1000, 2)
-                        if total_veh:
-                            pct_turismos = round(turismos / total_total * 100, 2)
-                            pct_motos = round(motos / total_total * 100, 2)
-                                    # Antigüedad media del parque (media simple) — D.18.d
-                        cols_antig = [
-                            "Antigüedad Media de Camiones",
-                            "Antigüedad Media de Turismos",
-                            "Antigüedad Media de Furgonetas",
-                            "Antigüedad Media de Ciclomotores",
-                            "Antigüedad Media de Motocicletas",
-                        ]
-                        vals = []
-                        for c in cols_antig:
-                            if c in dgt_row.columns:
-                                vals.append(pd.to_numeric(dgt_row[c].iloc[0], errors="coerce"))
-                        # media de los disponibles (ignora NaN)
-                        if len(vals):
-                            m = np.nanmean(vals)
-                            antig_media = round(float(m), 2) if not np.isnan(m) else None
-            except Exception:
-                pass
-
-            row = {
-                "Año": year,
-                "D.1 Variación Poblacional Últimos 10 años (%)": pop_variation_dict.get(year),
-                "D.18.a. Vehículos domiciliados cada 1000 hab.": veh_1000hab,
-                "D.18.b. % Turismos": pct_turismos,
-                "D.18.c. % Motocicletas": pct_motos,
-                "D.18.d. Antigüedad media del parque (años)": antig_media,
-                "D.22.a. Envejecimiento (%)": round(over_65 / total * 100, 2) if total else None,
-                "D.22.b. Senectud (%)": round(over_85 / over_65 * 100, 2) if over_65 else None,
-                "D.23 Población extranjera (%)": round(foreign / total * 100, 2) if total else None,
-                "D.24.a. Dependencia total (%)": round((pop_0_14 + over_65) / pop_15_64 * 100, 2) if pop_15_64 else None,
-                "D.24.b. Dependencia infantil (%)": round(pop_0_14 / pop_15_64 * 100, 2) if pop_15_64 else None,
-                "D.24.c. Dependencia mayores (%)": round(over_65 / pop_15_64 * 100, 2) if pop_15_64 else None,
-                "D.29 Viviendas por persona": None,
-                "D.32 Variación hogares 2011-2021 (%)": var_hogares_pct if year == "2021" else None,
-                "D.33 Crecimiento parque viviendas 2011-2021 (%)": crecimiento_viviendas_pct if year == "2021" else None,
-                "D.34 Vivienda secundaria (%)": None,
-                "D.35 Vivienda vacía 2011 (%)": viv_vacia_pct_2011 if year == "2021" else None,
-            }
-            # Indicador nuevo: Superficie cultivos código16 / superficie municipio
-            try:
-                if (
-                    "sup_cultivos_16" in st.session_state and 
-                    st.session_state["sup_cultivos_16"] is not None and
-                    gdf_muni is not None and 
-                    not gdf_muni.empty
-                ):
-                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
-                    if muni_area_ha > 0:
-                        pct16 = round((st.session_state["sup_cultivos_16"] / muni_area_ha) * 100, 2)
-                        row["D.02.b. Superficie de Cultivos (cod_16)"] = pct16
-                    else:
-                        row["D.02.b. Superficie de Cultivos (cod_16)"] = None
-                else:
-                    row["D.02.b. Superficie de Cultivos (cod_16)"] = None
-            except:
-                row["D.02.b. Superficie de Cultivos (cod_16)"] = None
-
-            if (
-                "sup_cultivos_09" in st.session_state and 
-                st.session_state["sup_cultivos_09"] is not None and
-                total
-            ):
-                verde_1000hab = round(st.session_state["sup_cultivos_09"] / (total / 1000), 2)
-                row["D.5. Superficie verde (ha cada 1.000 hab) (cod_09)"] = verde_1000hab
-            else:
-                row["D.5. Superficie verde (ha cada 1.000 hab) (cod_09)"] = None
-
-            # Indicador nuevo: Superficie cultivos código14 / superficie municipio
-            try:
-                if (
-                    "sup_cultivos_14" in st.session_state and 
-                    st.session_state["sup_cultivos_14"] is not None and
-                    gdf_muni is not None and 
-                    not gdf_muni.empty
-                ):
-                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
-                    if muni_area_ha > 0:
-                        sup14_pct = round((st.session_state["sup_cultivos_14"] / muni_area_ha) * 100, 2)
-                        row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = sup14_pct
-                    else:
-                        row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
-                else:
-                    row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
-            except:
-                row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
-
-            # Indicadores para código 12
-            try:
-                if (
-                    "sup_cultivos_12" in st.session_state and 
-                    st.session_state["sup_cultivos_12"] is not None and
-                    gdf_muni is not None and 
-                    not gdf_muni.empty
-                ):
-                    # Indicador 1: solo la superficie
-                    row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = round(st.session_state["sup_cultivos_12"], 2)
-            
-                    # Indicador 2: porcentaje sobre sup. municipal
-                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
-                    if muni_area_ha > 0:
-                        pct12 = round((st.session_state["sup_cultivos_12"] / muni_area_ha) * 100, 2)
-                        row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = pct12
-                    else:
-                        row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
-                else:
-                    row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = None
-                    row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
-            except:
-                row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = None
-                row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
-            
-            if year == "2021":
-                try:
-                    v_total = censo_df["viviendasT"].values[0]
-                    v_nop = censo_df["viviendasNoP"].values[0]
-                    pop_2021 = pop_df["total_total_total_2021"].values[0]
-                    row["D.34 Vivienda secundaria (%)"] = round((v_nop / v_total) * 100, 2)
-                    row["D.29 Viviendas por persona"] = round((v_total / pop_2021) * 1000, 4)       
-                except:
-                    pass
-            
-
-            # Indicador nuevo: Superficie cultivos código16 / superficie municipio
-            try:
-                if (
-                    "sup_cultivos_18" in st.session_state and 
-                    st.session_state["sup_cultivos_18"] is not None and
-                    gdf_muni is not None and 
-                    not gdf_muni.empty
-                ):
-                    muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
-                    if muni_area_ha > 0:
-                        pct16 = round((st.session_state["sup_cultivos_18"] / muni_area_ha) * 100, 2)
-                        row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = pct16
-                    else:
-                        row["D.02.a. Superficie de Cobertura Artificial (cod_18)    "] = None
-                else:
-                    row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
-            except:
-                row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
-
-
-
-            # --- D.26: % trabajadores por sector (media anual SEPE Contratos) ---
-            vals = sector_year_df[sector_year_df["anio"] == int(year)]
-            if not vals.empty:
-                row["D.26.a. Trabajadores en sector agricultura (%)"]  = vals.iloc[0]["agr_avg"]
-                row["D.26.b. Trabajadores en sector industria (%)"]    = vals.iloc[0]["ind_avg"]
-                row["D.26.c. Trabajadores en sector construcción (%)"] = vals.iloc[0]["con_avg"]
-                row["D.26.d. Trabajadores en sector servicios (%)"]    = vals.iloc[0]["ser_avg"]
-            else:
-                row["D.26.a. Trabajadores en sector agricultura (%)"]  = None
-                row["D.26.b. Trabajadores en sector industria (%)"]    = None
-                row["D.26.c. Trabajadores en sector construcción (%)"] = None
-                row["D.26.d. Trabajadores en sector servicios (%)"]    = None
-
-            # --- D.28 (SEPTIEMBRE) ---
-            # Si SOLO quieres 2024, deja la condición del año. Si lo quieres para todos los años, quita el 'and int(year) == 2024'.
-            d28a = d28b = d28c = None
-            if df_sepe_all is not None:  # and int(year) == 2024:
-                d28 = compute_d28(df_sepe_all, selected_muni, int(year), month_num=9)
-                n_total  = d28.get("n_total")
-                n_25_44  = d28.get("n_25_44")
-                n_mujer  = d28.get("n_mujer")
-
-                if n_total and pop_15_64:  # evita divisiones por 0/None
-                    d28a = round(n_total / pop_15_64 * 100, 2)
-                if n_total:
-                    d28b = round(n_25_44 / n_total * 100, 2) if n_25_44 is not None else None
-                    d28c = round(n_mujer / n_total * 100, 2)   if n_mujer is not None else None
-
-            row["D.28.a. Porcentaje de parados total (%)"] = d28a
-            row["D.28.b. Porcentaje de parados entre 25 y 44 años (%)"] = d28b
-            row["D.28.c. Porcentaje de paro femenino (%)"] = d28c
-
-
-
-
-            results.append(row)
-
-        results_df = pd.DataFrame(results)
-       
-
-        # Ordenar columnas por el número después de "D."
-        def get_d_number(col):
-            match = re.search(r"D\.(\d+)", col)
-            if match:
-                return int(match.group(1))
-            return 9999  # columnas que no tengan D.x al final
-
-        ordered_cols = sorted(results_df.columns, key=get_d_number)
-
-        # Reordenar DataFrame
-        results_df = results_df[["Año"] + [c for c in ordered_cols if c != "Año"]]
-
-
-        st.markdown(f"### 📈 Indicadores para **{selected_muni}**")
-
-        # Wider table, narrow map, with spacing to push the map to the right
-        col1, spacer, col2 = st.columns([3.5, 0.1, 0.8])
-        
-        with col1:
-            if not results_df.empty:
-                st.dataframe(results_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No hay datos disponibles para mostrar.")
-
-        with col2:
-            show_map = st.toggle("🗺️ Mostrar/Ocultar Mapa del Municipio", value=False)
-      
-        # Comparativa septiembre (foto del año) – solo para información
-        if selected_muni and 'sector_year_df' in locals() and not sector_year_df.empty:
-            comp_sep = (sector_year_df[["anio","agr_sep","ind_sep","con_sep","ser_sep"]]
-                        .rename(columns={
-                            "anio":"Año",
-                            "agr_sep":"Sept. Agricultura (%)",
-                            "ind_sep":"Sept. Industria (%)",
-                            "con_sep":"Sept. Construcción (%)",
-                            "ser_sep":"Sept. Servicios (%)"
-                        })
-                        .sort_values("Año"))
-            st.caption("📌 Comparativa de **septiembre** por año (referencia, la tabla principal usa la **media anual**):")
-            st.dataframe(comp_sep, use_container_width=True, hide_index=True)
-
-        if selected_muni and gdf_muni is not None and show_map:
-            st.markdown("### 🗺️ Mapa del Municipio con Recortes SIU")
-
-            gdf_muni_4326 = gdf_muni.to_crs(4326)
-            bounds = gdf_muni_4326.total_bounds
-            center_lat = (bounds[1] + bounds[3]) / 2
-            center_lon = (bounds[0] + bounds[2]) / 2
-
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-
-            # Capa del municipio (rojo)
-            folium.GeoJson(
-                gdf_muni_4326.__geo_interface__,
-                name="Municipio",
-                style_function=lambda feature: {
-                    'fillColor': 'red',
-                    'color': 'red',
-                    'weight': 2,
-                    'fillOpacity': 0.1,
-                },
-                tooltip="Municipio"
-            ).add_to(m)
-
-            import matplotlib
-
-            if gdf_all_clipped is not None and not gdf_all_clipped.empty:
-                gdf_all_clipped = gdf_all_clipped.to_crs(4326)
+            # Create a temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Extract the zip file
+                with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
                 
-                # Generar paleta de colores
-                unique_codsiu = sorted(gdf_all_clipped["CODSIU"].unique())
-                color_map = plt.get_cmap('tab20', len(unique_codsiu))  # 20 colores
-                codsiu_to_color = {
-                    cod: matplotlib.colors.rgb2hex(color_map(i)) for i, cod in enumerate(unique_codsiu)
-                }
-            
-                for codsiu in unique_codsiu:
-                    subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == codsiu]
-                    folium.GeoJson(
-                        subset.__geo_interface__,
-                        name=f"CODSIU {codsiu}",
-                        style_function=lambda feature, color=codsiu_to_color[codsiu]: {
-                            'fillColor': color,
-                            'color': color,
-                            'weight': 1,
-                            'fillOpacity': 0.4,
-                        },
-                        tooltip=folium.GeoJsonTooltip(
-                            fields=["CODSIU", "descripcion", "municipality"],
-                            aliases=["Código SIU:", "Descripción:", "Municipio:"],
-                            localize=True,
-                            sticky=True,
-                            labels=True,
-                            style="""
-                                background-color: white;
-                                border: 1px solid #ccc;
-                                border-radius: 3px;
-                                box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
-                                font-size: 10px;
-                                padding: 4px;
-                            """
-                        )
+                # Find the .shp file
+                shp_file = None
+                for file in os.listdir(temp_dir):
+                    if file.endswith('.shp'):
+                        shp_file = os.path.join(temp_dir, file)
+                        break
+                
+                if shp_file is None:
+                    st.error("❌ No se encontró archivo .shp en el ZIP")
+                    return None
+                
+                # Read the shapefile
+                gdf = gpd.read_file(shp_file)
+                return gdf
+                
+        except Exception as e:
+            st.error(f"❌ Error procesando shapefile: {str(e)}")
+            return None
 
-                    ).add_to(m)
-            
-
-            st_folium(m, width=1500, height=500, key="map_municipio_expandido")
-
-        
-        # -------------------- HISTORICAL POPULATION GRAPH --------------------
+    def process_geojson(uploaded_file):
+        """Process uploaded GeoJSON file and return GeoDataFrame"""
         try:
-            hist_df_raw = pd.read_parquet("population/poblacion_completa.parquet")
-            hist_df_raw.rename(columns={hist_df_raw.columns[0]: "municipio"}, inplace=True)
-            hist_row = hist_df_raw[hist_df_raw["municipio"].str.contains(selected_muni, case=False, na=False)]
-            if not hist_row.empty:
-                hist_row = hist_row.iloc[0]
+            gdf = gpd.read_file(uploaded_file)
+            return gdf
+        except Exception as e:
+            st.error(f"❌ Error procesando GeoJSON: {str(e)}")
+            return None
 
-                def clean_series(series):
-                    return pd.to_numeric(series.replace(r"^\s*$", pd.NA, regex=True), errors="coerce")
+    def display_geodata_info(gdf, filename):
+        """Display information about the GeoDataFrame"""
+        st.success(f"✅ Datos geoespaciales cargados: **{filename}**")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Geometrías", len(gdf))
+        with col2:
+            st.metric("Columnas", len(gdf.columns))
+        with col3:
+            st.metric("CRS", str(gdf.crs) if gdf.crs else "No definido")
+        with col4:
+            geom_types = gdf.geometry.geom_type.unique()
+            st.metric("Tipo geometría", ", ".join(geom_types))
+        
+        # Show attribute table - remove ALL geometry-related columns
+        st.subheader("📋 Tabla de Atributos")
+        display_df = gdf.copy()
+        
+        # Remove all potential geometry columns
+        geom_cols_to_remove = ['geometry', 'geom', 'geom_wkt']
+        for col in geom_cols_to_remove:
+            if col in display_df.columns:
+                display_df = display_df.drop(columns=[col])
+        
+        st.dataframe(display_df.head(10), use_container_width=True)
+        
+        # Show bounds
+        bounds = gdf.total_bounds
+        st.subheader("🗺️ Extensión Geográfica")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Min X (Oeste):** {bounds[0]:.6f}")
+            st.write(f"**Min Y (Sur):** {bounds[1]:.6f}")
+        with col2:
+            st.write(f"**Max X (Este):** {bounds[2]:.6f}")
+            st.write(f"**Max Y (Norte):** {bounds[3]:.6f}")
 
-                pop_t = clean_series(hist_row.filter(like="_t")).dropna()
-                pop_h = clean_series(hist_row.filter(like="_h")).dropna()
-                pop_m = clean_series(hist_row.filter(like="_m")).dropna()
+    def create_folium_map(gdf, map_title="Mapa"):
+        """Create a Folium map from GeoDataFrame"""
+        # Ensure CRS is WGS84 for web mapping
+        if gdf.crs != 'EPSG:4326':
+            gdf_web = gdf.to_crs('EPSG:4326')
+        else:
+            gdf_web = gdf.copy()
+        
+        # Calculate center
+        bounds = gdf_web.total_bounds
+        center_lat = (bounds[1] + bounds[3]) / 2
+        center_lon = (bounds[0] + bounds[2]) / 2
+        
+        # Create map
+        m = folium.Map(
+            location=[center_lat, center_lon],
+            zoom_start=8,
+            tiles='OpenStreetMap'
+        )
+        
+        # Add GeoDataFrame to map
+        folium.GeoJson(
+            gdf_web.__geo_interface__,
+            style_function=lambda feature: {
+                'fillColor': 'blue',
+                'color': 'black',
+                'weight': 2,
+                'fillOpacity': 0.3,
+            },
+            popup=folium.GeoJsonPopup(
+                fields=[col for col in gdf_web.columns if col != 'geometry']
+            )
 
-                def extract_years(series):
-                    return [int(col.split("_")[0]) for col in series.index]
+        ).add_to(m)
+        
+        return m
 
-                years = extract_years(pop_t)
+    def perform_spatial_clip(gdf_data, gdf_clip):
+        """Perform spatial clipping operation and recalculate area"""
+        try:
+            # Ensure both GDFs have valid CRS
+            if gdf_data.crs is None:
+                gdf_data.set_crs("EPSG:25830", inplace=True)
+            if gdf_clip.crs is None:
+                gdf_clip.set_crs("EPSG:25830", inplace=True)
+                
+            # Reproject to match
+            if gdf_data.crs != gdf_clip.crs:
+                gdf_data = gdf_data.to_crs(gdf_clip.crs)
 
-                hist_df = pd.DataFrame({
-                    "Año": years,
-                    "Total": pop_t.values,
-                    "Hombres": pop_h.values if len(pop_h) else [None] * len(years),
-                    "Mujeres": pop_m.values if len(pop_m) else [None] * len(years)
-                }).sort_values("Año")
+            # Perform clip
+            clipped_gdf = gpd.clip(gdf_data, gdf_clip)
 
-                st.markdown("### 📉 Evolución Histórica de la Población")
-                st.line_chart(hist_df.set_index("Año"))
+            if clipped_gdf.empty:
+                return None
 
-            else:
-                st.warning("⚠️ No hay datos históricos disponibles para este municipio.")
+            # Recalculate area using WGS84 (like your working code)
+            clipped_wgs84 = clipped_gdf.to_crs(epsg=4326)
+            area_m2 = calculate_ellipsoidal_area(clipped_wgs84)
+            clipped_gdf["area_m2"] = area_m2
+            clipped_gdf["area_ha"] = [a / 10000 for a in area_m2]
+            clipped_gdf["estal"] = clipped_gdf["area_ha"]  # Keep compatibility with your code
+
+            return clipped_gdf
 
         except Exception as e:
-            st.error(f"❌ Error cargando datos históricos de población: {e}")
+            st.error(f"❌ Error en operación de recorte: {str(e)}")
+            return None
 
-        st.markdown("---")
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            csv = results_df.to_csv(index=False)
-            st.download_button("📥 Descargar CSV", csv, f"indicadores_{selected_muni.replace(' ', '_')}.csv", "text/csv")
-        with col2:
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                results_df.to_excel(writer, index=False, sheet_name="Indicadores")
-            st.download_button("📊 Descargar Excel", buffer.getvalue(), f"indicadores_{selected_muni.replace(' ', '_')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    else:
-        st.markdown("---")
-        st.info("👆 **Instrucciones:**\n1. Usa el cuadro de búsqueda para encontrar un municipio\n2. O selecciona directamente de la lista desplegable\n3. Los indicadores se mostrarán automáticamente")
+    def export_geodata(gdf, filename_base, format_type):
+        """Export GeoDataFrame to different formats"""
+        try:
+            if format_type == "GeoJSON":
+                geojson_str = gdf.to_json()
+                return geojson_str, f"{filename_base}.geojson", "application/json"
+            
+            elif format_type == "Shapefile":
+                # Create a temporary directory and zip file
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    shp_path = os.path.join(temp_dir, f"{filename_base}.shp")
+                    gdf.to_file(shp_path)
+                    
+                    # Create zip file
+                    zip_path = os.path.join(temp_dir, f"{filename_base}_shapefile.zip")
+                    with zipfile.ZipFile(zip_path, 'w') as zipf:
+                        for file in os.listdir(temp_dir):
+                            if file.startswith(filename_base) and not file.endswith('.zip'):
+                                zipf.write(os.path.join(temp_dir, file), file)
+                    
+                    # Read zip file as bytes
+                    with open(zip_path, 'rb') as f:
+                        zip_data = f.read()
+                    
+                    return zip_data, f"{filename_base}_shapefile.zip", "application/zip"
+            
+            elif format_type == "CSV":
+                # Convert to regular DataFrame (lose geometry)
+                df = pd.DataFrame(gdf.drop(columns=['geometry']))
+                csv_data = df.to_csv(index=False)
+                return csv_data, f"{filename_base}.csv", "text/csv"
+                
+        except Exception as e:
+            st.error(f"❌ Error exportando datos: {str(e)}")
+            return None, None, None
+
+    def display_file_info(uploaded_file, df):
+        """Display information about the uploaded file"""
+        st.success(f"✅ Archivo cargado: **{uploaded_file.name}**")
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total Municipios", len(municipalities))
+            st.metric("Filas", len(df))
         with col2:
-            st.metric("Años de Datos", len(YEARS))
+            st.metric("Columnas", len(df.columns))
         with col3:
-            st.metric("Indicadores", "15")
+            st.metric("Tamaño", f"{uploaded_file.size / 1024:.1f} KB")
+        
+        # Show basic info about the dataset
+        st.subheader("📋 Información del Dataset")
+        st.write("**Columnas:**")
+        st.write(", ".join(df.columns.tolist()))
+        
+        st.write("**Primeras 5 filas:**")
+        st.dataframe(df.head(), use_container_width=True)
+        
+        # Data types
+        st.write("**Tipos de datos:**")
+        dtype_df = pd.DataFrame({
+            'Columna': df.dtypes.index,
+            'Tipo': df.dtypes.values
+        })
+        st.dataframe(dtype_df, use_container_width=True, hide_index=True)
+        
+        # Basic statistics for numeric columns
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        if len(numeric_cols) > 0:
+            st.write("**Estadísticas básicas (columnas numéricas):**")
+            st.dataframe(df[numeric_cols].describe(), use_container_width=True)
+        
+        # Check for missing values
+        missing_data = df.isnull().sum()
+        if missing_data.sum() > 0:
+            st.write("**Valores faltantes:**")
+            missing_df = pd.DataFrame({
+                'Columna': missing_data.index,
+                'Valores faltantes': missing_data.values,
+                'Porcentaje': (missing_data.values / len(df) * 100).round(2)
+            })
+            missing_df = missing_df[missing_df['Valores faltantes'] > 0]
+            st.dataframe(missing_df, use_container_width=True, hide_index=True)
 
-st.markdown("## 📈 Evolución temporal SEPE (paro y contratos)")
-parquet_path = st.text_input("Ruta parquet SEPE", value="sepe_global.parquet")
-st.session_state["sepe_parquet_path"] = parquet_path
-
-try:
-    
-    df_sepe = load_sepe_parquet(parquet_path)
-    if selected_muni:
-        df_sepe = subset_muni_first(df_sepe, selected_muni)
-    if selected_muni:
-        ts_paro, ts_cont = build_timeseries(df_sepe, selected_muni)
-
-        colA, colB = st.columns(2)
-        with colA:
-            st.subheader("Paro total")
-            if not ts_paro.empty:
-                st.line_chart(ts_paro.set_index("fecha"))
+    def process_uploaded_file(uploaded_file):
+        """Process the uploaded file and return a DataFrame"""
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                # Try different encodings for CSV
+                try:
+                    df = pd.read_csv(uploaded_file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        uploaded_file.seek(0)  # Reset file pointer
+                        df = pd.read_csv(uploaded_file, encoding='latin-1')
+                    except UnicodeDecodeError:
+                        uploaded_file.seek(0)
+                        df = pd.read_csv(uploaded_file, encoding='cp1252')
+            
+            elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(uploaded_file)
+            
+            elif uploaded_file.name.endswith('.json'):
+                df = pd.read_json(uploaded_file)
+            
+            elif uploaded_file.name.endswith('.parquet'):
+                df = pd.read_parquet(uploaded_file)
+            
             else:
-                st.info("No hay datos de paro para este municipio en el parquet.")
+                st.error("❌ Formato de archivo no soportado. Use CSV, Excel, JSON o Parquet.")
+                return None
+                
+            return df
+            
+        except Exception as e:
+            st.error(f"❌ Error al procesar el archivo: {str(e)}")
+            return None
 
-        with colB:
-            st.subheader("Contratos totales")
-            if not ts_cont.empty:
-                st.line_chart(ts_cont.set_index("fecha"))
+    from pyproj import Geod
+
+    def calculate_ellipsoidal_area(gdf):
+        """Calculate ellipsoidal area (like QGIS $area) in m² using WGS84"""
+        geod = Geod(ellps="WGS84")
+
+        areas = []
+        for geom in gdf.geometry:
+            if geom is None or geom.is_empty:
+                areas.append(0)
             else:
-                st.info("No hay datos de contratos para este municipio en el parquet.")
+                if geom.geom_type == "Polygon":
+                    area, _ = geod.geometry_area_perimeter(geom)
+                elif geom.geom_type == "MultiPolygon":
+                    area = sum(geod.geometry_area_perimeter(p)[0] for p in geom.geoms)
+                else:
+                    area = 0
+                areas.append(abs(area))  # Ensure positive
 
-        with st.expander("Ver desgloses (si existen en el parquet)"):
-            muni_norm_target = normalize_muni(selected_muni)
+        return areas
 
-            posibles_p = ["pSAgricultura","pSIndustria","pSConstruccion","pSServicios","pSSinEmpleo",
-                          "pH25","pH2544","pH45","pM25","pM2544","pM45"]
-            cols_presentes_p = [c for c in posibles_p if c in df_sepe.columns]
-            if cols_presentes_p:
-                dfp = (df_sepe[(df_sepe.get("tipo")=="p") & (df_sepe["muni_norm"]==muni_norm_target)]
-                       [["fecha"]+cols_presentes_p]
-                       .groupby("fecha", as_index=False).sum().sort_values("fecha"))
-                st.write("Paro - desgloses")
-                st.dataframe(dfp.tail(12), use_container_width=True)
+    # -------------------- LOAD DATASETS --------------------
+    @st.cache_data
+    def load_data():
+        try:
+            df = pd.read_parquet("structured_population.parquet")
+            df.columns = df.columns.astype(str)
+            df_censo = pd.read_parquet("structured_censo.parquet")
+            df_hog_2011 = pd.read_parquet("structured_censo2011_hogares.parquet")
+            df_hog_2021 = pd.read_parquet("structured_censo2021_hogares.parquet")
+            df_censo2011 = pd.read_parquet("structured_censo2011_viviendas.parquet")
+            dgt_files = {
+                "2021": "dgt2021.parquet",
+                "2022": "dgt2022.parquet",
+                "2023": "dgt2023.parquet",
+                "2024": "dgt2024.parquet",
+            }
+            df_dgt_by_year = {}
+            for y, path in dgt_files.items():
+                try:
+                    d = pd.read_parquet(path)
+                    # clave de emparejamiento igual que usabas
+                    d["municipio_completo"] = d["Código INE"].astype(str).str.zfill(5) + " " + d["Municipio"]
+                    df_dgt_by_year[y] = d
+                except Exception:
+                    df_dgt_by_year[y] = None  # si falta el fichero, evita fallar
+
+            return df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt_by_year
+        
+                
+        except Exception as e:
+            st.error(f"❌ No se pudieron cargar los archivos Parquet: {e}")
+            return None, None, None, None, None, None
+
+    @st.cache_data
+    def load_internal_bases_all_codsiu(selected_muni):
+        """Carga todos los CODSIU (1-20) para un municipio"""
+        try:
+            engine = get_db_connection()
+            query = """
+                SELECT * 
+                FROM dev_codeine.siu_siose_with_municipalities
+                WHERE municipality ILIKE %(municipality)s
+                AND "CODSIU" BETWEEN 1 AND 20
+            """
+            with engine.connect() as conn:
+                gdf_all = gpd.read_postgis(query, conn, geom_col="geom", params={
+                    "municipality": f"%{selected_muni}%"
+                })
+            return gdf_all
+        except Exception as e:
+            st.error(f"❌ Error cargando capas base desde PostgreSQL: {e}")
+            return None
+
+
+
+    from pathlib import Path
+
+    @st.cache_data
+    def load_municipio_geojson_by_code(municipio, df):
+        """Carga GeoJSON usando el código INE del municipio"""
+        try:
+            code_ine = df[df["municipio"] == municipio]["municipio"].astype(str).str.zfill(5).values[0]
+        except IndexError:
+            st.warning(f"No se encontró código INE para el municipio '{municipio}'")
+            return None
+
+        # Buscar el archivo que empieza por ese código
+        folder = Path("geojson_municipios")
+        matching_files = list(folder.glob(f"{code_ine}*.geojson"))
+
+        if not matching_files:
+            st.warning(f"⚠️ No se encontró un GeoJSON para el código INE {code_ine}")
+            return None
+
+        try:
+            return gpd.read_file(matching_files[0])
+        except Exception as e:
+            st.warning(f"⚠️ Error leyendo GeoJSON de {municipio}: {e}")
+            return None
+
+
+
+    # === PARO & CONTRATOS DESDE PARQUET GLOBAL ===
+
+    def normalize_muni(name: str) -> str:
+        """Quita código si viene '28079 Madrid', elimina tildes y pasa a MAYÚSCULAS."""
+        if pd.isna(name):
+            return None
+        s = str(name).strip()
+        m = re.match(r"^\s*\d+\s+(.+)$", s)
+        if m:
+            s = m.group(1)
+        s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+        return " ".join(s.upper().split())
+
+    @st.cache_data
+    def load_sepe_parquet(path="sepe_global.parquet"):
+        df = pd.read_parquet(path)
+
+        # Unificar municipio y normalizar mes
+        if "pMunicipio" in df.columns or "cMunicipio" in df.columns:
+            df["muni"] = df.get("pMunicipio").fillna(df.get("cMunicipio"))
+            df["muni_norm"] = df["muni"].apply(normalize_muni)
+        else:
+            raise ValueError("El parquet SEPE no tiene columnas de municipio (pMunicipio/cMunicipio).")
+
+        mes_map = {
+            "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+            "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,
+            "noviembre":11,"diciembre":12
+        }
+        df["mes_norm"] = df["mes"].astype(str).str.strip().str.lower()
+        df["mes_num"]  = df["mes_norm"].map(mes_map)
+        df = df[df["mes_num"].notna()].copy()
+        df["anio"] = df["anio"].astype(int)
+        df["fecha"] = pd.to_datetime(dict(year=df["anio"], month=df["mes_num"].astype(int), day=1))
+
+        # >>> NUEVO: preservar orden original para "primera coincidencia"
+        df["row_order"] = df.reset_index().index
+
+        return df
+
+
+    def subset_muni_first(df: pd.DataFrame, display_muni: str) -> pd.DataFrame:
+        """
+        Devuelve solo las filas del municipio (muni_norm) quedándose con
+        el PRIMER valor crudo de 'muni' que aparece en el parquet (por row_order).
+        Útil cuando 'SORIA' aparece como municipio y luego como provincia.
+        """
+        target = normalize_muni(display_muni)
+        if "muni_norm" not in df.columns:
+            return df.iloc[0:0].copy()
+
+        # Filtra por el normalizado y orden original
+        cand = df[df["muni_norm"] == target].copy()
+        if "row_order" in cand.columns:
+            cand = cand.sort_values("row_order")
+        if cand.empty:
+            return cand
+
+        # Primer 'muni' crudo que aparece para ese muni_norm
+        first_raw = cand["muni"].dropna().iloc[0]
+
+        # Mantén solo ese 'muni' crudo
+        filtered = df[(df["muni_norm"] == target) & (df["muni"] == first_raw)].copy()
+
+        # Mensaje útil si hubo más de un crudo distinto
+        other_raws = cand["muni"].dropna().unique().tolist()
+        if len(set(other_raws)) > 1:
+            st.caption(f"🔎 Coincidencias múltiples para **{display_muni}**: {other_raws}. "
+                    f"Usando la primera: **{first_raw}**")
+
+        return filtered
+
+
+    def build_timeseries(df_sepe: pd.DataFrame, display_muni: str):
+        target = normalize_muni(display_muni)
+        df_muni = subset_muni_first(df_sepe, display_muni)
+        # --- PARO ---
+        if "tipo" in df_sepe.columns:
+            df_paro = df_sepe[(df_sepe["tipo"]=="p") & (df_sepe["muni_norm"]==target)].copy()
+        else:
+            df_paro = df_sepe[df_sepe["muni_norm"]==target].filter(regex=r"^p|fecha").copy()
+        ts_paro = pd.DataFrame()
+        if "pTotal" in df_paro.columns:
+            ts_paro = (df_paro.groupby("fecha", as_index=False)["pTotal"].sum()
+                            .sort_values("fecha"))
+
+        # --- CONTRATOS ---
+        if "tipo" in df_sepe.columns:
+            df_cont = df_sepe[(df_sepe["tipo"]=="c") & (df_sepe["muni_norm"]==target)].copy()
+        else:
+            df_cont = df_sepe[df_sepe["muni_norm"]==target].filter(regex=r"^c|fecha").copy()
+        ts_cont = pd.DataFrame()
+        if "cTotal" in df_cont.columns:      # <-- nombre correcto
+            ts_cont = (df_cont.groupby("fecha", as_index=False)["cTotal"].sum()
+                            .sort_values("fecha"))
+
+        return ts_paro, ts_cont
+
+    def _sector_percentages_from_row(row) -> pd.Series:
+        tot = float(row.get("cTotal", 0) or 0)
+        if tot <= 0 or pd.isna(tot):
+            return pd.Series([None]*4, index=["agr","ind","con","ser"])
+        return pd.Series([
+            round(row.get("cSAgricultura", 0)/tot*100, 2),
+            round(row.get("cSIndustria", 0)/tot*100, 2),
+            round(row.get("cSConstruccion", 0)/tot*100, 2),
+            round(row.get("cSServicios", 0)/tot*100, 2),
+        ], index=["agr","ind","con","ser"])
+
+
+    def sector_shares_by_year(df_sepe: pd.DataFrame, display_muni: str, debug: bool=False) -> pd.DataFrame:
+        target = normalize_muni(display_muni)
+
+        # 1) Filtra CONTRATOS del municipio y fija un único "muni" crudo
+        dfc_all = subset_muni_first(df_sepe, display_muni)
+        dfc = dfc_all[dfc_all.get("tipo") == "c"].copy()
+        if dfc.empty:
+            if debug: st.info("D.26: no hay filas para este municipio.")
+            return pd.DataFrame(columns=[
+                "anio","agr_avg","ind_avg","con_avg","ser_avg","agr_sep","ind_sep","con_sep","ser_sep"
+            ])
+
+        # 2) Asegura numéricos
+        cols = ["cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]
+        for c in cols:
+            if c in dfc.columns:
+                dfc[c] = pd.to_numeric(dfc[c], errors="coerce").fillna(0)
             else:
-                st.caption("No se encontraron columnas de desglose de paro.")
+                dfc[c] = 0
 
-            posibles_c = ["cSAgricultura","cSIndustria","cSConstruccion","cSServicios",
-                          "cHInicIndefinido","cHTemporal","cHConvertIndefinido",
-                          "cMInicIndefinido","cMTemporal","cMConvertIndefinido"]
-            cols_presentes_c = [c for c in posibles_c if c in df_sepe.columns]
-            if cols_presentes_c:
-                dfc = (df_sepe[(df_sepe.get("tipo")=="c") & (df_sepe["muni_norm"]==muni_norm_target)]
-                       [["fecha"]+cols_presentes_c]
-                       .groupby("fecha", as_index=False).sum().sort_values("fecha"))
-                st.write("Contratos - desgloses")
-                st.dataframe(dfc.tail(12), use_container_width=True)
+        # 3) Quedarse con UNA fila por (anio, mes_num) usando el orden original si existe
+        if "row_order" not in dfc.columns:
+            dfc["row_order"] = dfc.reset_index().index
+
+        # Ordena por año, mes y orden original; luego elimina duplicados por (anio, mes_num)
+        dfc_clean = (dfc.sort_values(["anio","mes_num","row_order"])
+                    .drop_duplicates(subset=["anio","mes_num"], keep="first")
+                    .copy())
+
+        # 4) Construir "monthly" DESDE LOS BRUTOS (ya depurados a 1 fila por mes)
+        #    (groupby + sum no cambia los valores porque ya hay 1 fila por mes, pero lo dejamos por seguridad)
+        monthly = (dfc_clean.groupby(["anio","mes_num"], as_index=False)[cols].sum())
+
+        # 5) % mensuales por sector
+        monthly["agr_pct"] = (monthly["cSAgricultura"] / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+        monthly["ind_pct"] = (monthly["cSIndustria"]   / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+        monthly["con_pct"] = (monthly["cSConstruccion"]/ monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+        monthly["ser_pct"] = (monthly["cSServicios"]   / monthly["cTotal"]).where(monthly["cTotal"]>0).mul(100)
+
+        # 6) MEDIA anual (promedio simple de los % mensuales)
+        year_avg = (monthly.groupby("anio", as_index=False)[["agr_pct","ind_pct","con_pct","ser_pct"]]
+                            .mean().round(2)
+                            .rename(columns={
+                                "agr_pct":"agr_avg","ind_pct":"ind_avg",
+                                "con_pct":"con_avg","ser_pct":"ser_avg"
+                            }))
+
+        # 7) SEPTIEMBRE: % solo para mes 9
+        sep = (monthly[monthly["mes_num"]==9][["anio","agr_pct","ind_pct","con_pct","ser_pct"]]
+            .rename(columns={
+                "agr_pct":"agr_sep","ind_pct":"ind_sep",
+                "con_pct":"con_sep","ser_pct":"ser_sep"
+            }).round(2))
+
+        out = year_avg.merge(sep, on="anio", how="left")
+
+        # 8) Debug opcional mostrando EXACTAMENTE los datos depurados
+        if debug:
+            st.subheader("🧪 D.26 DEBUG – % mensuales y medias anuales (desde brutos depurados)")
+            st.caption("Brutos depurados a 1 fila por mes (dfc_clean):")
+            cols_dbg = ["anio","mes_num","muni","archivo","sheet_name"] + cols
+            cols_dbg = [c for c in cols_dbg if c in dfc_clean.columns]
+            st.dataframe(dfc_clean.sort_values(["anio","mes_num"])[cols_dbg],
+                        use_container_width=True)
+
+            st.caption("Matriz mensual (tras depurar → 1 fila/mes y calcular %):")
+            st.dataframe(monthly.sort_values(["anio","mes_num"])[
+                ["anio","mes_num","cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios",
+                "agr_pct","ind_pct","con_pct","ser_pct"]
+            ], use_container_width=True)
+
+            st.caption("Medias anuales de % + septiembre:")
+            dbg = out.copy()
+            dbg["sum_%_avg"] = dbg[["agr_avg","ind_avg","con_avg","ser_avg"]].sum(axis=1).round(2)
+            st.dataframe(dbg.sort_values("anio"), use_container_width=True)
+
+        return out
+
+
+    def keep_one_per_month(df: pd.DataFrame, prefer: str = "first") -> pd.DataFrame:
+        """
+        Devuelve una única fila por (anio, mes_num).
+        prefer = "first"  -> usa el orden original (row_order) si existe.
+        prefer = "min"    -> usa la fila con menor cTotal (si existe cTotal).
+        """
+        key = ["anio", "mes_num"]
+        tmp = df.copy()
+
+        if prefer == "min" and "cTotal" in tmp.columns:
+            tmp = (tmp.sort_values(key + ["cTotal"])
+                    .drop_duplicates(subset=key, keep="first"))
+        else:
+            extra = ["row_order"] if "row_order" in tmp.columns else []
+            tmp = (tmp.sort_values(key + extra)
+                    .drop_duplicates(subset=key, keep="first"))
+        return tmp
+
+
+    def show_d26_debug(df_sepe: pd.DataFrame, display_muni: str):
+        """
+        Depuración de D.26 para un municipio:
+        - Bruto mensual (filas originales)
+        - Agregado por mes (sumas y %)
+        - Agregado anual (sumas y %)
+        - Septiembre (sumas y %)
+        - Conteo de filas por mes (posibles duplicados)
+        """
+        
+
+        # 1) filtra CONTRATOS y aplica "quédate con el primer municipio crudo"
+        dfc_all = df_sepe[df_sepe.get("tipo") == "c"].copy()
+        dfc = subset_muni_first(dfc_all, display_muni)   # <<--- AQUÍ se fuerza el primero
+        if dfc.empty:
+            st.warning("No hay registros de CONTRATOS para este municipio en el parquet.")
+            return
+
+        # 2) asegura tipos numéricos
+        cols = ["cTotal","cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]
+        for c in cols:
+            dfc[c] = pd.to_numeric(dfc[c], errors="coerce")
+        dfc[cols] = dfc[cols].fillna(0)
+
+        # 3) selector de año
+        years = sorted(dfc["anio"].dropna().astype(int).unique())
+        year_sel = st.selectbox("Año (depuración D.26)", years, index=len(years)-1)
+        dfc_y = dfc[dfc["anio"] == year_sel].copy()
+        dfc_y = keep_one_per_month(dfc_y, prefer="first")
+
+        # --- (1) bruto mensual
+        st.subheader("🔢 Bruto mensual (filas originales)")
+        raw_cols = ["anio","mes_num","mes","fecha","muni","archivo","sheet_name"] + cols
+        raw_cols = [c for c in raw_cols if c in dfc_y.columns]
+        df_raw = dfc_y[raw_cols].copy()
+
+        sec_cols = [c for c in ["cSAgricultura","cSIndustria","cSConstruccion","cSServicios"] if c in df_raw.columns]
+        if sec_cols:
+            df_raw["sum_sectores"] = df_raw[sec_cols].sum(axis=1)
+            df_raw["gap_total_minus_sect"] = df_raw.get("cTotal", 0) - df_raw["sum_sectores"]
+            if "cSAgricultura" in df_raw.columns and "cTotal" in df_raw.columns:
+                df_raw["%Agr_fila"] = (df_raw["cSAgricultura"] / df_raw["cTotal"] * 100)\
+                                        .replace([np.inf, -np.inf], np.nan).round(2)
+        st.dataframe(df_raw.sort_values(["anio","mes_num"]), use_container_width=True)
+
+        # --- (2) agregado por mes
+        st.subheader("📦 Agregado por mes (sumas y %)")
+        gb = (dfc_y.groupby(["anio","mes_num","mes"], as_index=False)[cols].sum())
+        gb["sum_sectores"] = gb[["cSAgricultura","cSIndustria","cSConstruccion","cSServicios"]].sum(axis=1)
+        gb["gap_total_minus_sect"] = gb["cTotal"] - gb["sum_sectores"]
+        gb["%Agr"] = (gb["cSAgricultura"] / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+        gb["%Ind"] = (gb["cSIndustria"]   / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+        gb["%Con"] = (gb["cSConstruccion"]/ gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+        gb["%Ser"] = (gb["cSServicios"]   / gb["cTotal"] * 100).where(gb["cTotal"] > 0).round(2)
+        st.dataframe(gb.sort_values("mes_num"), use_container_width=True)
+
+        # --- (3) agregado anual
+        st.subheader("🧮 Agregado ANUAL (sumas del año y %)")
+        annual = dfc_y[cols].sum().to_frame("valor").T
+        annual.insert(0, "anio", year_sel)
+        annual["%Agr"] = (annual["cSAgricultura"] / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+        annual["%Ind"] = (annual["cSIndustria"]   / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+        annual["%Con"] = (annual["cSConstruccion"]/ annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+        annual["%Ser"] = (annual["cSServicios"]   / annual["cTotal"] * 100).where(annual["cTotal"] > 0).round(2)
+        st.dataframe(annual, use_container_width=True)
+
+        # --- (4) septiembre
+        st.subheader("📌 SEPTIEMBRE (sumas de septiembre y %)")
+        sep = dfc_y[dfc_y["mes_num"] == 9][cols].sum().to_frame("valor").T
+        sep.insert(0, "anio", year_sel)
+        sep["%Agr"] = (sep["cSAgricultura"] / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+        sep["%Ind"] = (sep["cSIndustria"]   / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+        sep["%Con"] = (sep["cSConstruccion"]/ sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+        sep["%Ser"] = (sep["cSServicios"]   / sep["cTotal"] * 100).where(sep["cTotal"] > 0).round(2)
+        st.dataframe(sep, use_container_width=True)
+
+        # --- (5) conteo filas por mes (ya sobre un único municipio crudo)
+        st.caption("🧩 Conteo de filas por mes (para detectar duplicados o múltiples filas por mes)")
+        cnt = dfc_y.groupby(["anio","mes_num"]).size().reset_index(name="n_filas")
+        st.dataframe(cnt.sort_values("mes_num"), use_container_width=True)
+
+
+    def compute_d28(df_sepe: pd.DataFrame, display_muni: str, year: int, month_num: int = 9):
+        """
+        Calcula D.28.* a partir del parquet SEPE para un municipio y año dados,
+        tomando como referencia el mes 'month_num' (por defecto septiembre=9).
+
+        Devuelve: dict con n_total, n_25_44, n_mujer y flags de disponibilidad.
+        """
+        # 1) Filtrado municipio (misma lógica que usas para evitar duplicados)
+        dfp = subset_muni_first(df_sepe, display_muni)
+        dfp = dfp[(dfp.get("tipo") == "p") & (dfp["anio"] == year) & (dfp["mes_num"] == month_num)].copy()
+        if dfp.empty:
+            return {"n_total": None, "n_25_44": None, "n_mujer": None}
+
+        # 2) Asegura numéricos
+        need_cols = ["pTotal","pH2544","pM2544","pM25","pM45"]
+        for c in need_cols:
+            if c in dfp.columns:
+                dfp[c] = pd.to_numeric(dfp[c], errors="coerce").fillna(0)
             else:
-                st.caption("No se encontraron columnas de desglose de contratos.")
+                dfp[c] = 0
 
-except Exception as e:
-    st.error(f"❌ Error con el parquet SEPE: {e}")
+        # 3) Quédate con UNA fila por mes (por si acaso)
+        dfp = keep_one_per_month(dfp, prefer="first")
 
-with st.expander("🔎 Depuración D.26 — contratos por sector (valores brutos y %)", expanded=False):
+        # 4) Cálculos
+        n_total  = float(dfp["pTotal"].iloc[0]) if "pTotal" in dfp.columns and not dfp.empty else None
+        n_25_44  = float(dfp["pH2544"].iloc[0] + dfp["pM2544"].iloc[0]) if not dfp.empty else None
+        n_mujer  = float((dfp["pM25"].iloc[0] + dfp["pM2544"].iloc[0] + dfp["pM45"].iloc[0])) if not dfp.empty else None
+
+        return {"n_total": n_total, "n_25_44": n_25_44, "n_mujer": n_mujer}
+
+
+
+    # -------------------- MAIN APP --------------------
+    st.title("📊 Indicadores INE por Municipio")
+
+    # Add tabs for different functionalities
+    # Only one tab: Análisis INE
+    tab1 = st.container()
+
+
+    with tab1:
+        st.markdown("---")
+        
+        # Load original data
+        data_loaded = load_data()
+        if all(d is not None for d in data_loaded):
+            df, df_censo, df_hog_2011, df_hog_2021, df_censo2011, df_dgt_by_year = data_loaded
+
+        else:
+            st.error("❌ No se pudieron cargar los datos base del INE")
+            st.stop()
+
+        # Constants
+        YEARS = ["2024", "2023", "2022", "2021"]
+        age_65_plus = ["65_69", "70_74", "75_79", "80_84", "85_89", "90_94", "95_99", "100"]
+        age_85_plus = ["85_89", "90_94", "95_99", "100"]
+        ages_0_14 = ["0_4", "5_9", "10_14"]
+        ages_15_64 = ["15_19", "20_24", "25_29", "30_34", "35_39", "40_44", "45_49", "50_54", "55_59", "60_64"]
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.markdown("### 🏨️ Selección de Municipio")
+            municipalities = sorted(df["municipio"].dropna().unique(), key=str.lower)
+            search_term = st.text_input("🔍 Buscar municipio:", placeholder="Escribe para buscar un municipio...")
+
+            if search_term:
+                filtered_municipalities = [m for m in municipalities if search_term.lower() in m.lower()]
+                if filtered_municipalities:
+                    selected_muni = st.selectbox("Municipios encontrados:", filtered_municipalities, index=None)
+                else:
+                    st.warning("❌ No se encontraron municipios que coincidan con tu búsqueda.")
+                    selected_muni = None
+            else:
+                selected_muni = st.selectbox("O selecciona directamente:", municipalities, index=None)
+
+        with col2:
+            if selected_muni:
+                st.markdown("### ℹ️ Información:")
+                st.info(f"**Municipio seleccionado:**\n{selected_muni}")
+                try:
+                    total_pop_2024 = df[df["municipio"] == selected_muni]["total_total_total_2024"].values[0]
+                    st.metric("Población Total 2024", f"{total_pop_2024:,}" if total_pop_2024 else "No disponible")
+                except:
+                    pass
+
+        if selected_muni:
+            st.markdown("---")
+            pop_df = df[df["municipio"] == selected_muni]
+            with st.spinner("🔍 Procesando capa geográfica del municipio..."):
+                gdf_muni = load_municipio_geojson_by_code(selected_muni, df)
+                municipio_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+                st.write(f"🟫 Superficie del municipio: {municipio_area_ha:,.2f} ha")
+
+                gdf_all_codsiu = load_internal_bases_all_codsiu(selected_muni)
+
+                # Recorte general para todos los CODSIU
+                if gdf_all_codsiu is not None:
+                    gdf_all_clipped = perform_spatial_clip(gdf_all_codsiu, gdf_muni)
+                    if gdf_all_clipped is not None and not gdf_all_clipped.empty:
+                        gdf_all_clipped["CODSIU"] = gdf_all_clipped["CODSIU"].astype(int)
+                        for cod in [9, 12, 14, 16, 18]:                        
+                            subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == cod]
+                            if not subset.empty:
+                                estal_sum = subset["estal"].sum()
+                                st.session_state[f"sup_cultivos_{cod:02d}"] = estal_sum
+                            else:
+                                st.session_state[f"sup_cultivos_{cod:02d}"] = None                                
+                else:
+                    st.info("ℹ️ No se encontró geometría para este municipio o falló la carga.")
+
+            if pop_df.empty:
+                st.error("❌ No se encontraron datos para el municipio seleccionado.")
+                st.stop()
+
+            censo_df = df_censo[df_censo["Municipio de residencia"].str.contains(selected_muni, case=False, na=False)]
+
+            # Vivienda/hogar histórico
+            hog_2011 = df_hog_2011[df_hog_2011["municipio"].str.contains(selected_muni, case=False, na=False)]
+            hog_2021 = df_hog_2021[df_hog_2021["municipio"].str.contains(selected_muni, case=False, na=False)]
+            viv_2011 = df_censo2011[df_censo2011["Municipio de residencia"].str.contains(selected_muni, case=False, na=False)]
+
+            try:
+                n_hog_2011 = hog_2011["nHogares"].values[0]
+                n_hog_2021 = hog_2021["nHogares"].values[0]
+                var_hogares_pct = round((n_hog_2021 - n_hog_2011) / n_hog_2011 * 100, 2)
+            except:
+                var_hogares_pct = None
+
+            try:
+                n_viv_2011 = viv_2011["viviendasTotal"].values[0]
+                n_viv_2021 = censo_df["viviendasT"].values[0]
+                crecimiento_viviendas_pct = round((n_viv_2021 - n_viv_2011) / n_viv_2011 * 100, 2)
+            except:
+                crecimiento_viviendas_pct = None
+
+            try:
+                n_viv_vacias_2011 = viv_2011["viviendasVacias"].values[0]
+                viv_vacia_pct_2011 = round(n_viv_vacias_2011 / n_viv_2011 * 100, 2)
+            except:
+                viv_vacia_pct_2011 = None
+
+
+        
+
+            # Result table
+            results = []
+
+            # -------------------- CALCULATE POPULATION VARIATION FOR EACH YEAR --------------------
+            pop_variation_dict = {}
+
+            try:
+                hist_df_raw = pd.read_parquet("population/poblacion_completa.parquet")
+                hist_df_raw.rename(columns={hist_df_raw.columns[0]: "municipio"}, inplace=True)
+                hist_row = hist_df_raw[hist_df_raw["municipio"].str.contains(selected_muni, case=False, na=False)]
+
+                if not hist_row.empty:
+                    hist_row = hist_row.iloc[0]
+
+                    def clean_series(series):
+                        return pd.to_numeric(series.replace(r"^\s*$", pd.NA, regex=True), errors="coerce")
+
+                    pop_t = clean_series(hist_row.filter(like="_t")).dropna()
+                    pop_years = [int(col.split("_")[0]) for col in pop_t.index]
+                    pop_series = pd.Series(pop_t.values, index=pop_years).sort_index()
+
+                    for year in YEARS:
+                        y = int(year)
+                        if y in pop_series.index and (y - 10) in pop_series.index:
+                            base = pop_series[y - 10]
+                            current = pop_series[y]
+                            pct = round((current - base) / base * 100, 2) if base else None
+                            pop_variation_dict[year] = pct
+                        else:
+                            pop_variation_dict[year] = None
+                        
+
+            except:
+                for year in YEARS:
+                    pop_variation_dict[year] = None
+
+            # === SEPE para D.26 y D.28 (carga una sola vez) ===
+            try:
+                parquet_path_for_d26 = st.session_state.get("sepe_parquet_path", "sepe_global.parquet")
+                df_sepe_all = load_sepe_parquet(parquet_path_for_d26)
+                sector_year_df = sector_shares_by_year(df_sepe_all, selected_muni, debug=False)
+            except Exception as e:
+                st.warning(f"No se pudieron calcular D.26 desde SEPE: {e}")
+                sector_year_df = pd.DataFrame()
+                df_sepe_all = None
+
+
+
+            for year in YEARS:
+                total = pop_df.get(f"total_total_total_{year}", pd.Series([0])).values[0]
+                over_65 = pop_df[[f"total_{age}_total_{year}" for age in age_65_plus if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
+                over_85 = pop_df[[f"total_{age}_total_{year}" for age in age_85_plus if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
+                foreign = pop_df.get(f"total_total_EX_{year}", pd.Series([0])).values[0]
+                pop_0_14 = pop_df[[f"total_{age}_total_{year}" for age in ages_0_14 if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
+                pop_15_64 = pop_df[[f"total_{age}_total_{year}" for age in ages_15_64 if f"total_{age}_total_{year}" in pop_df.columns]].sum(axis=1).values[0]
+
+                # --- Indicadores DGT por año ---
+                veh_1000hab, pct_turismos, pct_motos = None, None, None
+                try:
+                    df_dgt_year = df_dgt_by_year.get(year)
+                    if df_dgt_year is not None:
+                        dgt_row = df_dgt_year[df_dgt_year["municipio_completo"].str.lower() == selected_muni.lower()]
+                        if not dgt_row.empty:
+                            turismos = dgt_row["Parque Turismos"].values[0]
+                            motos = dgt_row["Parque Motocicletas"].values[0]
+                            total_veh = turismos + motos
+                            total_total = dgt_row["Parque Total"].values[0]
+                            pop_year = total
+                            if pop_year and (turismos is not None) and (motos is not None):
+                                veh_1000hab = round((turismos + motos) / pop_year * 1000, 2)
+                            if total_veh:
+                                pct_turismos = round(turismos / total_total * 100, 2)
+                                pct_motos = round(motos / total_total * 100, 2)
+                                        # Antigüedad media del parque (media simple) — D.18.d
+                            cols_antig = [
+                                "Antigüedad Media de Camiones",
+                                "Antigüedad Media de Turismos",
+                                "Antigüedad Media de Furgonetas",
+                                "Antigüedad Media de Ciclomotores",
+                                "Antigüedad Media de Motocicletas",
+                            ]
+                            vals = []
+                            for c in cols_antig:
+                                if c in dgt_row.columns:
+                                    vals.append(pd.to_numeric(dgt_row[c].iloc[0], errors="coerce"))
+                            # media de los disponibles (ignora NaN)
+                            if len(vals):
+                                m = np.nanmean(vals)
+                                antig_media = round(float(m), 2) if not np.isnan(m) else None
+                except Exception:
+                    pass
+
+                row = {
+                    "Año": year,
+                    "D.1 Variación Poblacional Últimos 10 años (%)": pop_variation_dict.get(year),
+                    "D.18.a. Vehículos domiciliados cada 1000 hab.": veh_1000hab,
+                    "D.18.b. % Turismos": pct_turismos,
+                    "D.18.c. % Motocicletas": pct_motos,
+                    "D.18.d. Antigüedad media del parque (años)": antig_media,
+                    "D.22.a. Envejecimiento (%)": round(over_65 / total * 100, 2) if total else None,
+                    "D.22.b. Senectud (%)": round(over_85 / over_65 * 100, 2) if over_65 else None,
+                    "D.23 Población extranjera (%)": round(foreign / total * 100, 2) if total else None,
+                    "D.24.a. Dependencia total (%)": round((pop_0_14 + over_65) / pop_15_64 * 100, 2) if pop_15_64 else None,
+                    "D.24.b. Dependencia infantil (%)": round(pop_0_14 / pop_15_64 * 100, 2) if pop_15_64 else None,
+                    "D.24.c. Dependencia mayores (%)": round(over_65 / pop_15_64 * 100, 2) if pop_15_64 else None,
+                    "D.29 Viviendas por persona": None,
+                    "D.32 Variación hogares 2011-2021 (%)": var_hogares_pct if year == "2021" else None,
+                    "D.33 Crecimiento parque viviendas 2011-2021 (%)": crecimiento_viviendas_pct if year == "2021" else None,
+                    "D.34 Vivienda secundaria (%)": None,
+                    "D.35 Vivienda vacía 2011 (%)": viv_vacia_pct_2011 if year == "2021" else None,
+                }
+                # Indicador nuevo: Superficie cultivos código16 / superficie municipio
+                try:
+                    if (
+                        "sup_cultivos_16" in st.session_state and 
+                        st.session_state["sup_cultivos_16"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                        if muni_area_ha > 0:
+                            pct16 = round((st.session_state["sup_cultivos_16"] / muni_area_ha) * 100, 2)
+                            row["D.02.b. Superficie de Cultivos (cod_16)"] = pct16
+                        else:
+                            row["D.02.b. Superficie de Cultivos (cod_16)"] = None
+                    else:
+                        row["D.02.b. Superficie de Cultivos (cod_16)"] = None
+                except:
+                    row["D.02.b. Superficie de Cultivos (cod_16)"] = None
+
+                if (
+                    "sup_cultivos_09" in st.session_state and 
+                    st.session_state["sup_cultivos_09"] is not None and
+                    total
+                ):
+                    verde_1000hab = round(st.session_state["sup_cultivos_09"] / (total / 1000), 2)
+                    row["D.5. Superficie verde (ha cada 1.000 hab) (cod_09)"] = verde_1000hab
+                else:
+                    row["D.5. Superficie verde (ha cada 1.000 hab) (cod_09)"] = None
+
+                # Indicador nuevo: Superficie cultivos código14 / superficie municipio
+                try:
+                    if (
+                        "sup_cultivos_14" in st.session_state and 
+                        st.session_state["sup_cultivos_14"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                        if muni_area_ha > 0:
+                            sup14_pct = round((st.session_state["sup_cultivos_14"] / muni_area_ha) * 100, 2)
+                            row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = sup14_pct
+                        else:
+                            row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
+                    else:
+                        row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
+                except:
+                    row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
+
+                # Indicadores para código 12
+                try:
+                    if (
+                        "sup_cultivos_12" in st.session_state and 
+                        st.session_state["sup_cultivos_12"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        # Indicador 1: solo la superficie
+                        row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = round(st.session_state["sup_cultivos_12"], 2)
+                
+                        # Indicador 2: porcentaje sobre sup. municipal
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                        if muni_area_ha > 0:
+                            pct12 = round((st.session_state["sup_cultivos_12"] / muni_area_ha) * 100, 2)
+                            row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = pct12
+                        else:
+                            row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
+                    else:
+                        row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = None
+                        row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
+                except:
+                    row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = None
+                    row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
+                
+                if year == "2021":
+                    try:
+                        v_total = censo_df["viviendasT"].values[0]
+                        v_nop = censo_df["viviendasNoP"].values[0]
+                        pop_2021 = pop_df["total_total_total_2021"].values[0]
+                        row["D.34 Vivienda secundaria (%)"] = round((v_nop / v_total) * 100, 2)
+                        row["D.29 Viviendas por persona"] = round((v_total / pop_2021) * 1000, 4)       
+                    except:
+                        pass
+                
+
+                # Indicador nuevo: Superficie cultivos código16 / superficie municipio
+                try:
+                    if (
+                        "sup_cultivos_18" in st.session_state and 
+                        st.session_state["sup_cultivos_18"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                        if muni_area_ha > 0:
+                            pct16 = round((st.session_state["sup_cultivos_18"] / muni_area_ha) * 100, 2)
+                            row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = pct16
+                        else:
+                            row["D.02.a. Superficie de Cobertura Artificial (cod_18)    "] = None
+                    else:
+                        row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
+                except:
+                    row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
+
+
+
+                # --- D.26: % trabajadores por sector (media anual SEPE Contratos) ---
+                vals = sector_year_df[sector_year_df["anio"] == int(year)]
+                if not vals.empty:
+                    row["D.26.a. Trabajadores en sector agricultura (%)"]  = vals.iloc[0]["agr_avg"]
+                    row["D.26.b. Trabajadores en sector industria (%)"]    = vals.iloc[0]["ind_avg"]
+                    row["D.26.c. Trabajadores en sector construcción (%)"] = vals.iloc[0]["con_avg"]
+                    row["D.26.d. Trabajadores en sector servicios (%)"]    = vals.iloc[0]["ser_avg"]
+                else:
+                    row["D.26.a. Trabajadores en sector agricultura (%)"]  = None
+                    row["D.26.b. Trabajadores en sector industria (%)"]    = None
+                    row["D.26.c. Trabajadores en sector construcción (%)"] = None
+                    row["D.26.d. Trabajadores en sector servicios (%)"]    = None
+
+                # --- D.28 (SEPTIEMBRE) ---
+                # Si SOLO quieres 2024, deja la condición del año. Si lo quieres para todos los años, quita el 'and int(year) == 2024'.
+                d28a = d28b = d28c = None
+                if df_sepe_all is not None:  # and int(year) == 2024:
+                    d28 = compute_d28(df_sepe_all, selected_muni, int(year), month_num=9)
+                    n_total  = d28.get("n_total")
+                    n_25_44  = d28.get("n_25_44")
+                    n_mujer  = d28.get("n_mujer")
+
+                    if n_total and pop_15_64:  # evita divisiones por 0/None
+                        d28a = round(n_total / pop_15_64 * 100, 2)
+                    if n_total:
+                        d28b = round(n_25_44 / n_total * 100, 2) if n_25_44 is not None else None
+                        d28c = round(n_mujer / n_total * 100, 2)   if n_mujer is not None else None
+
+                row["D.28.a. Porcentaje de parados total (%)"] = d28a
+                row["D.28.b. Porcentaje de parados entre 25 y 44 años (%)"] = d28b
+                row["D.28.c. Porcentaje de paro femenino (%)"] = d28c
+
+
+
+
+                results.append(row)
+
+            results_df = pd.DataFrame(results)
+        
+
+            # Ordenar columnas por el número después de "D."
+            def get_d_number(col):
+                match = re.search(r"D\.(\d+)", col)
+                if match:
+                    return int(match.group(1))
+                return 9999  # columnas que no tengan D.x al final
+
+            ordered_cols = sorted(results_df.columns, key=get_d_number)
+
+            # Reordenar DataFrame
+            results_df = results_df[["Año"] + [c for c in ordered_cols if c != "Año"]]
+
+
+            st.markdown(f"### 📈 Indicadores para **{selected_muni}**")
+
+            # Wider table, narrow map, with spacing to push the map to the right
+            col1, spacer, col2 = st.columns([3.5, 0.1, 0.8])
+            
+            with col1:
+                if not results_df.empty:
+                    st.dataframe(results_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No hay datos disponibles para mostrar.")
+
+            with col2:
+                show_map = st.toggle("🗺️ Mostrar/Ocultar Mapa del Municipio", value=False)
+        
+            # Comparativa septiembre (foto del año) – solo para información
+            if selected_muni and 'sector_year_df' in locals() and not sector_year_df.empty:
+                comp_sep = (sector_year_df[["anio","agr_sep","ind_sep","con_sep","ser_sep"]]
+                            .rename(columns={
+                                "anio":"Año",
+                                "agr_sep":"Sept. Agricultura (%)",
+                                "ind_sep":"Sept. Industria (%)",
+                                "con_sep":"Sept. Construcción (%)",
+                                "ser_sep":"Sept. Servicios (%)"
+                            })
+                            .sort_values("Año"))
+                st.caption("📌 Comparativa de **septiembre** por año (referencia, la tabla principal usa la **media anual**):")
+                st.dataframe(comp_sep, use_container_width=True, hide_index=True)
+
+            if selected_muni and gdf_muni is not None and show_map:
+                st.markdown("### 🗺️ Mapa del Municipio con Recortes SIU")
+
+                gdf_muni_4326 = gdf_muni.to_crs(4326)
+                bounds = gdf_muni_4326.total_bounds
+                center_lat = (bounds[1] + bounds[3]) / 2
+                center_lon = (bounds[0] + bounds[2]) / 2
+
+                m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
+
+                # Capa del municipio (rojo)
+                folium.GeoJson(
+                    gdf_muni_4326.__geo_interface__,
+                    name="Municipio",
+                    style_function=lambda feature: {
+                        'fillColor': 'red',
+                        'color': 'red',
+                        'weight': 2,
+                        'fillOpacity': 0.1,
+                    },
+                    tooltip="Municipio"
+                ).add_to(m)
+
+                import matplotlib
+
+                if gdf_all_clipped is not None and not gdf_all_clipped.empty:
+                    gdf_all_clipped = gdf_all_clipped.to_crs(4326)
+                    
+                    # Generar paleta de colores
+                    unique_codsiu = sorted(gdf_all_clipped["CODSIU"].unique())
+                    color_map = plt.get_cmap('tab20', len(unique_codsiu))  # 20 colores
+                    codsiu_to_color = {
+                        cod: matplotlib.colors.rgb2hex(color_map(i)) for i, cod in enumerate(unique_codsiu)
+                    }
+                
+                    for codsiu in unique_codsiu:
+                        subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == codsiu]
+                        folium.GeoJson(
+                            subset.__geo_interface__,
+                            name=f"CODSIU {codsiu}",
+                            style_function=lambda feature, color=codsiu_to_color[codsiu]: {
+                                'fillColor': color,
+                                'color': color,
+                                'weight': 1,
+                                'fillOpacity': 0.4,
+                            },
+                            tooltip=folium.GeoJsonTooltip(
+                                fields=["CODSIU", "descripcion", "municipality"],
+                                aliases=["Código SIU:", "Descripción:", "Municipio:"],
+                                localize=True,
+                                sticky=True,
+                                labels=True,
+                                style="""
+                                    background-color: white;
+                                    border: 1px solid #ccc;
+                                    border-radius: 3px;
+                                    box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+                                    font-size: 10px;
+                                    padding: 4px;
+                                """
+                            )
+
+                        ).add_to(m)
+                
+
+                st_folium(m, width=1500, height=500, key="map_municipio_expandido")
+
+            
+            # -------------------- HISTORICAL POPULATION GRAPH --------------------
+            try:
+                hist_df_raw = pd.read_parquet("population/poblacion_completa.parquet")
+                hist_df_raw.rename(columns={hist_df_raw.columns[0]: "municipio"}, inplace=True)
+                hist_row = hist_df_raw[hist_df_raw["municipio"].str.contains(selected_muni, case=False, na=False)]
+                if not hist_row.empty:
+                    hist_row = hist_row.iloc[0]
+
+                    def clean_series(series):
+                        return pd.to_numeric(series.replace(r"^\s*$", pd.NA, regex=True), errors="coerce")
+
+                    pop_t = clean_series(hist_row.filter(like="_t")).dropna()
+                    pop_h = clean_series(hist_row.filter(like="_h")).dropna()
+                    pop_m = clean_series(hist_row.filter(like="_m")).dropna()
+
+                    def extract_years(series):
+                        return [int(col.split("_")[0]) for col in series.index]
+
+                    years = extract_years(pop_t)
+
+                    hist_df = pd.DataFrame({
+                        "Año": years,
+                        "Total": pop_t.values,
+                        "Hombres": pop_h.values if len(pop_h) else [None] * len(years),
+                        "Mujeres": pop_m.values if len(pop_m) else [None] * len(years)
+                    }).sort_values("Año")
+
+                    st.markdown("### 📉 Evolución Histórica de la Población")
+                    st.line_chart(hist_df.set_index("Año"))
+
+                else:
+                    st.warning("⚠️ No hay datos históricos disponibles para este municipio.")
+
+            except Exception as e:
+                st.error(f"❌ Error cargando datos históricos de población: {e}")
+
+            st.markdown("---")
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                csv = results_df.to_csv(index=False)
+                st.download_button("📥 Descargar CSV", csv, f"indicadores_{selected_muni.replace(' ', '_')}.csv", "text/csv")
+            with col2:
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    results_df.to_excel(writer, index=False, sheet_name="Indicadores")
+                st.download_button("📊 Descargar Excel", buffer.getvalue(), f"indicadores_{selected_muni.replace(' ', '_')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            st.markdown("---")
+            st.info("👆 **Instrucciones:**\n1. Usa el cuadro de búsqueda para encontrar un municipio\n2. O selecciona directamente de la lista desplegable\n3. Los indicadores se mostrarán automáticamente")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Municipios", len(municipalities))
+            with col2:
+                st.metric("Años de Datos", len(YEARS))
+            with col3:
+                st.metric("Indicadores", "15")
+
+    st.markdown("## 📈 Evolución temporal SEPE (paro y contratos)")
+    parquet_path = st.text_input("Ruta parquet SEPE", value="sepe_global.parquet")
+    st.session_state["sepe_parquet_path"] = parquet_path
+
     try:
-        # Usa la misma ruta que el text input de abajo, o fija aquí la ruta
-        parquet_path_for_d26 = st.session_state.get("sepe_parquet_path", "sepe_global.parquet")
-        df_sepe_all = load_sepe_parquet(parquet_path_for_d26)
-        show_d26_debug(df_sepe_all, selected_muni)
+        
+        df_sepe = load_sepe_parquet(parquet_path)
+        if selected_muni:
+            df_sepe = subset_muni_first(df_sepe, selected_muni)
+        if selected_muni:
+            ts_paro, ts_cont = build_timeseries(df_sepe, selected_muni)
+
+            colA, colB = st.columns(2)
+            with colA:
+                st.subheader("Paro total")
+                if not ts_paro.empty:
+                    st.line_chart(ts_paro.set_index("fecha"))
+                else:
+                    st.info("No hay datos de paro para este municipio en el parquet.")
+
+            with colB:
+                st.subheader("Contratos totales")
+                if not ts_cont.empty:
+                    st.line_chart(ts_cont.set_index("fecha"))
+                else:
+                    st.info("No hay datos de contratos para este municipio en el parquet.")
+
+            with st.expander("Ver desgloses (si existen en el parquet)"):
+                muni_norm_target = normalize_muni(selected_muni)
+
+                posibles_p = ["pSAgricultura","pSIndustria","pSConstruccion","pSServicios","pSSinEmpleo",
+                            "pH25","pH2544","pH45","pM25","pM2544","pM45"]
+                cols_presentes_p = [c for c in posibles_p if c in df_sepe.columns]
+                if cols_presentes_p:
+                    dfp = (df_sepe[(df_sepe.get("tipo")=="p") & (df_sepe["muni_norm"]==muni_norm_target)]
+                        [["fecha"]+cols_presentes_p]
+                        .groupby("fecha", as_index=False).sum().sort_values("fecha"))
+                    st.write("Paro - desgloses")
+                    st.dataframe(dfp.tail(12), use_container_width=True)
+                else:
+                    st.caption("No se encontraron columnas de desglose de paro.")
+
+                posibles_c = ["cSAgricultura","cSIndustria","cSConstruccion","cSServicios",
+                            "cHInicIndefinido","cHTemporal","cHConvertIndefinido",
+                            "cMInicIndefinido","cMTemporal","cMConvertIndefinido"]
+                cols_presentes_c = [c for c in posibles_c if c in df_sepe.columns]
+                if cols_presentes_c:
+                    dfc = (df_sepe[(df_sepe.get("tipo")=="c") & (df_sepe["muni_norm"]==muni_norm_target)]
+                        [["fecha"]+cols_presentes_c]
+                        .groupby("fecha", as_index=False).sum().sort_values("fecha"))
+                    st.write("Contratos - desgloses")
+                    st.dataframe(dfc.tail(12), use_container_width=True)
+                else:
+                    st.caption("No se encontraron columnas de desglose de contratos.")
+
     except Exception as e:
-        st.error(f"No se pudo generar la depuración D.26: {e}")
+        st.error(f"❌ Error con el parquet SEPE: {e}")
+
+    with st.expander("🔎 Depuración D.26 — contratos por sector (valores brutos y %)", expanded=False):
+        try:
+            # Usa la misma ruta que el text input de abajo, o fija aquí la ruta
+            parquet_path_for_d26 = st.session_state.get("sepe_parquet_path", "sepe_global.parquet")
+            df_sepe_all = load_sepe_parquet(parquet_path_for_d26)
+            show_d26_debug(df_sepe_all, selected_muni)
+        except Exception as e:
+            st.error(f"No se pudo generar la depuración D.26: {e}")
 
 
 
 
 
-st.markdown("---")
-st.markdown("""
-    <div style='text-align: center; color: #666; font-size: 0.8em;'>
-        📊 Aplicación de Indicadores INE por Municipio<br>
-        Datos del Instituto Nacional de Estadística (INE)
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown("""
+        <div style='text-align: center; color: #666; font-size: 0.8em;'>
+            📊 Aplicación de Indicadores INE por Municipio<br>
+            Datos del Instituto Nacional de Estadística (INE)
+        </div>
+        """, unsafe_allow_html=True)
+    
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        # Mostrar en la UI y forzar que salga en logs
+        st.error("Error al iniciar la app:")
+        st.exception(e)
+        traceback.print_exc(file=sys.stderr)
+        raise
