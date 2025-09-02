@@ -906,6 +906,22 @@ with tab1:
                         if total_veh:
                             pct_turismos = round(turismos / total_total * 100, 2)
                             pct_motos = round(motos / total_total * 100, 2)
+                                    # Antigüedad media del parque (media simple) — D.18.d
+                        cols_antig = [
+                            "Antigüedad Media de Camiones",
+                            "Antigüedad Media de Turismos",
+                            "Antigüedad Media de Furgonetas",
+                            "Antigüedad Media de Ciclomotores",
+                            "Antigüedad Media de Motocicletas",
+                        ]
+                        vals = []
+                        for c in cols_antig:
+                            if c in dgt_row.columns:
+                                vals.append(pd.to_numeric(dgt_row[c].iloc[0], errors="coerce"))
+                        # media de los disponibles (ignora NaN)
+                        if len(vals):
+                            m = np.nanmean(vals)
+                            antig_media = round(float(m), 2) if not np.isnan(m) else None
             except Exception:
                 pass
 
@@ -915,6 +931,7 @@ with tab1:
                 "D.18.a. Vehículos domiciliados cada 1000 hab.": veh_1000hab,
                 "D.18.b. % Turismos": pct_turismos,
                 "D.18.c. % Motocicletas": pct_motos,
+                "D.18.d. Antigüedad media del parque (años)": antig_media,
                 "D.22.a. Envejecimiento (%)": round(over_65 / total * 100, 2) if total else None,
                 "D.22.b. Senectud (%)": round(over_85 / over_65 * 100, 2) if over_65 else None,
                 "D.23 Población extranjera (%)": round(foreign / total * 100, 2) if total else None,
@@ -1053,13 +1070,13 @@ with tab1:
                 n_total  = d28.get("n_total")
                 n_25_44  = d28.get("n_25_44")
                 n_mujer  = d28.get("n_mujer")
-            
+
                 if n_total and pop_15_64:  # evita divisiones por 0/None
                     d28a = round(n_total / pop_15_64 * 100, 2)
                 if n_total:
                     d28b = round(n_25_44 / n_total * 100, 2) if n_25_44 is not None else None
                     d28c = round(n_mujer / n_total * 100, 2)   if n_mujer is not None else None
-            
+
             row["D.28.a. Porcentaje de parados total (%)"] = d28a
             row["D.28.b. Porcentaje de parados entre 25 y 44 años (%)"] = d28b
             row["D.28.c. Porcentaje de paro femenino (%)"] = d28c
