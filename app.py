@@ -18,7 +18,6 @@ st.set_page_config(page_title="Indicadores Khôra", layout="wide")
 
 
 def main():
-    st.write("App cargada. Preparando datos...")
     # -------------------- PAGE CONFIG --------------------
     st.set_page_config(
         page_title="Indicadores INE por Municipio",
@@ -219,6 +218,244 @@ def main():
         except Exception as e:
             st.error(f"❌ Error exportando datos: {str(e)}")
             return None, None, None
+
+
+    def compute_d03b_municipal(selected_muni: str, gdf_muni: gpd.GeoDataFrame, gdf_all_codsiu: gpd.GeoDataFrame):
+        """
+        Calcula D.03b a nivel del término municipal seleccionado:
+          - Numerador: área ha de (CODSIU=14 ∩ municipio)
+          - Denominador: área ha de (clase de suelo urbana/urbanizable ∩ municipio)
+        Devuelve dict con áreas y el indicador, más los GeoDataFrames recortados.
+        """
+        if gdf_muni is None or gdf_muni.empty:
+            return None
+        if gdf_all_codsiu is None or gdf_all_codsiu.empty:
+            st.warning("No hay capa SIU/SIOSE cargada para el municipio.")
+            return None
+
+        crs_metric = "EPSG:25830"
+
+        # Asegura CRS métrico
+        for g in (gdf_muni, gdf_all_codsiu):
+            if g.crs is None:
+                g.set_crs(crs_metric, inplace=True)
+            elif g.crs.to_string() != crs_metric:
+                g.to_crs(crs_metric, inplace=True)
+
+        # --- Numerador: CODSIU = 14, recortado al municipio ---
+        siu14 = gdf_all_codsiu[gdf_all_codsiu["CODSIU"].astype(int) == 14].copy()
+        if siu14.empty:
+            area_cod14_ha = 0.0
+            siu14_clip = siu14
+        else:
+            if siu14.crs.to_string() != crs_metric:
+                siu14 = siu14.to_crs(crs_metric)
+            # Intersección con el término municipal
+            siu14_clip = gpd.overlay(siu14, gdf_muni, how="intersection", keep_geom_type=True)
+            # Disolver para evitar solapes de piezas dentro del municipio
+            if not siu14_clip.empty:
+                siu14_clip = siu14_clip.dissolve().explode(index_parts=False)
+            area_cod14_ha = siu14_clip.geometry.area.sum() / 10000.0 if not siu14_clip.empty else 0.0
+
+            # --- Denominador: Clase de suelo urbana/urbanizable, recortada al municipio ---
+            gdf_clase = load_clase_suelo_by_municipality(selected_muni)
+            if gdf_clase is None or gdf_clase.empty:
+                st.warning("No hay clase de suelo para el municipio (consulta vacía).")
+                return {
+                    "area_cod14_ha": round(area_cod14_ha, 2),
+                    "area_suelo_urb_ha": 0.0,
+                    "d03b": 0.0,
+                    "siu14_clip": siu14_clip,
+                    "suelo_urb_clip": gpd.GeoDataFrame(geometry=[], crs=crs_metric),
+                }
+
+            # A CRS métrico
+            if gdf_clase.crs is None or gdf_clase.crs.to_string() != crs_metric:
+                gdf_clase = gdf_clase.to_crs(crs_metric)
+
+            # Normalizador de texto
+            def _norm_txt(s):
+                if pd.isna(s): return ""
+                import unicodedata, re
+                s = str(s).strip()
+                s = "".join(c for c in unicodedata.normalize("NFKD", s) if unicodedata.category(c) != "Mn")
+                s = re.sub(r"\s+", " ", s.upper())
+                return s
+
+            gdf_clase["_clase_norm"] = gdf_clase["clasesuelo"].apply(_norm_txt)
+
+            # 1) Intersección de TODAS las clases con el municipio (para debug y fallback)
+            clip_all = gpd.overlay(gdf_clase, gdf_muni, how="intersection", keep_geom_type=True)
+            area_all_ha = (clip_all.geometry.area.sum() / 10000.0) if not clip_all.empty else 0.0
+
+            # 2) DENOMINADOR ROBUSTO: "todo salvo SUELO NO URBANIZABLE"
+            mask_urb = clip_all["_clase_norm"] != "SUELO NO URBANIZABLE"
+            suelo_urb_clip = clip_all[mask_urb].copy()
+
+            # Si quieres EXCLUIR/INCLUIR SISTEMAS GENERALES explícitamente, descomenta:
+            # include_sg = True
+            # if not include_sg:
+            #     suelo_urb_clip = suelo_urb_clip[suelo_urb_clip["_clase_norm"] != "SISTEMAS GENERALES"]
+
+            # 3) Disolver para evitar dobles conteos
+            if not suelo_urb_clip.empty:
+                suelo_urb_clip = suelo_urb_clip.dissolve().explode(index_parts=False)
+
+            area_suelo_urb_ha = suelo_urb_clip.geometry.area.sum() / 10000.0 if not suelo_urb_clip.empty else 0.0
+            # Muestra qué clases están entrando/saliendo
+            if area_suelo_urb_ha == 0.0 and area_all_ha > 0:
+                st.info("El denominador sigue a 0; muestro las clases presentes en la intersección para ajustar reglas:")
+                st.write(clip_all["_clase_norm"].value_counts())
+
+            # --- Indicador ---
+            d03b = 0.0 if area_suelo_urb_ha <= 0 else (area_cod14_ha / area_suelo_urb_ha) * 100.0
+        return {
+            "area_cod14_ha": round(area_cod14_ha, 2),
+            "area_suelo_urb_ha": round(area_suelo_urb_ha, 2),
+            "d03b": round(d03b, 2),
+            "siu14_clip": siu14_clip,
+            "suelo_urb_clip": suelo_urb_clip,
+        }
+
+    def compute_d04_municipal_by_muni(selected_muni: str, gdf_muni: gpd.GeoDataFrame):
+        """
+        D.04 (municipal): % de superficie municipal que es
+        ('SUELO URBANIZABLE NO DELIMITADO O SECTORIZADO', 'SUELO NO URBANIZABLE')
+        """
+        if gdf_muni is None or gdf_muni.empty:
+            return {"d04": None, "area_obj_ha": 0.0, "area_muni_ha": 0.0}
+
+        # Área municipal (ha) con área elipsoidal (WGS84)
+        muni_wgs = gdf_muni.to_crs(4326)
+        area_muni_ha = sum(calculate_ellipsoidal_area(muni_wgs)) / 10000.0
+
+        gdf_clase = load_clase_suelo_by_municipality(selected_muni)
+        if gdf_clase is None or gdf_clase.empty:
+            return {"d04": 0.0 if area_muni_ha > 0 else None,
+                    "area_obj_ha": 0.0,
+                    "area_muni_ha": round(area_muni_ha, 2)}
+
+        # Normalización de texto
+        def _norm(s):
+            if pd.isna(s): return ""
+            s = "".join(c for c in unicodedata.normalize("NFKD", str(s)) if unicodedata.category(c) != "Mn")
+            return re.sub(r"\s+", " ", s.upper().strip())
+
+        objetivos = {
+            "SUELO URBANIZABLE NO DELIMITADO O SECTORIZADO",
+            "SUELO NO URBANIZABLE",
+        }
+        gdf_clase = gdf_clase.copy()
+        gdf_clase["_clase_norm"] = gdf_clase["clasesuelo"].apply(_norm)
+        gdf_obj = gdf_clase[gdf_clase["_clase_norm"].isin({_norm(v) for v in objetivos})].copy()
+        if gdf_obj.empty:
+            return {"d04": 0.0 if area_muni_ha > 0 else None,
+                    "area_obj_ha": 0.0,
+                    "area_muni_ha": round(area_muni_ha, 2)}
+
+        # CRS métrico + reparar geometrías
+        crs_metric = gdf_muni.crs or "EPSG:25830"
+        if gdf_obj.crs is None or gdf_obj.crs != crs_metric:
+            gdf_obj = gdf_obj.to_crs(crs_metric)
+        gdf_m = gdf_muni if (gdf_muni.crs == crs_metric) else gdf_muni.to_crs(crs_metric)
+
+        # 🔧 Normaliza el nombre de la columna de geometría a 'geometry' para evitar KeyError
+        if gdf_obj.geometry.name != "geometry":
+            gdf_obj = gdf_obj.set_geometry(gdf_obj.geometry.name).rename_geometry("geometry")
+        if gdf_m.geometry.name != "geometry":
+            gdf_m = gdf_m.set_geometry(gdf_m.geometry.name).rename_geometry("geometry")
+
+        try:
+            gdf_obj["geometry"] = gdf_obj.geometry.buffer(0)
+            gdf_m["geometry"]   = gdf_m.geometry.buffer(0)
+        except Exception:
+            pass
+
+        # Intersección + disolver (equivale a ST_Union(ST_Intersection(...)))
+        inter = gpd.overlay(gdf_obj, gdf_m, how="intersection", keep_geom_type=True)
+        if inter.empty:
+            area_obj_ha = 0.0
+        else:
+            inter_dis = inter.dissolve().explode(index_parts=False)
+            inter_wgs = inter_dis.to_crs(4326)
+            area_obj_ha = sum(calculate_ellipsoidal_area(inter_wgs)) / 10000.0
+
+        d04 = (area_obj_ha / area_muni_ha * 100.0) if area_muni_ha > 0 else None
+        return {
+            "d04": None if d04 is None else round(d04, 2),
+            "area_obj_ha": round(area_obj_ha, 2),
+            "area_muni_ha": round(area_muni_ha, 2),
+        }
+
+
+
+    from sqlalchemy import text
+
+    def compute_d02a_municipal_postgis(selected_muni: str, gdf_muni: gpd.GeoDataFrame):
+        """
+        D.02.a (CORINE) municipal, ejecutado en PostGIS:
+        % de superficie municipal ocupada por CORINE (códigos 111..142)
+        """
+        if gdf_muni is None or gdf_muni.empty:
+            return {"d02a_pct": None, "area_corine_ha": 0.0, "area_muni_ha": 0.0}
+
+        # 1) Disolver municipio y llevar a EPSG:25830
+        crs_metric = "EPSG:25830"
+        muni_25830 = gdf_muni.to_crs(crs_metric).dissolve().explode(index_parts=False)
+        geom_union = muni_25830.unary_union
+        if geom_union.is_empty:
+            return {"d02a_pct": None, "area_corine_ha": 0.0, "area_muni_ha": 0.0}
+
+        muni_wkt = geom_union.wkt  # WKT en 25830
+
+        # 2) SQL en PostGIS (todo en BD)
+        codes = ("111","112","121","122","123","124","131","132","133","141","142")
+        sql = text("""
+            WITH muni AS (
+                SELECT ST_GeomFromText(:muni_wkt, 25830) AS geom
+            ),
+            corine_sel AS (
+                SELECT geom
+                FROM public.corine_d02
+                WHERE "CODE_18" = ANY(:codes)
+            ),
+            inter AS (
+                SELECT ST_Union(ST_Intersection(c.geom, m.geom)) AS geom
+                FROM corine_sel c
+                CROSS JOIN muni m
+                WHERE ST_Intersects(c.geom, m.geom)
+            )
+            SELECT
+                COALESCE(ST_Area(i.geom) / 10000.0, 0) AS area_corine_ha,
+                ST_Area(m.geom) / 10000.0                 AS area_muni_ha,
+                CASE
+                    WHEN i.geom IS NULL OR ST_Area(m.geom) = 0 THEN 0
+                    ELSE (ST_Area(i.geom) / ST_Area(m.geom)) * 100
+                END AS d02a_pct
+            FROM muni m
+            LEFT JOIN inter i ON TRUE;
+        """)
+
+        try:
+            engine = get_db_connection()
+            with engine.connect() as conn:
+                # NOTA: para pasar arrays a ANY() con SQLAlchemy text, mándalo como lista
+                res = conn.execute(sql, {"muni_wkt": muni_wkt, "codes": list(codes)}).mappings().first()
+            if not res:
+                return {"d02a_pct": None, "area_corine_ha": 0.0, "area_muni_ha": 0.0}
+
+            out = {
+                "d02a_pct": round(float(res["d02a_pct"]), 2) if res["d02a_pct"] is not None else None,
+                "area_corine_ha": round(float(res["area_corine_ha"]), 2) if res["area_corine_ha"] is not None else 0.0,
+                "area_muni_ha": round(float(res["area_muni_ha"]), 2) if res["area_muni_ha"] is not None else 0.0,
+            }
+            return out
+        except Exception as e:
+            st.error(f"❌ Error calculando D.02.a (CORINE) en PostGIS: {e}")
+            return {"d02a_pct": None, "area_corine_ha": 0.0, "area_muni_ha": 0.0}
+
+
+
 
     def display_file_info(uploaded_file, df):
         """Display information about the uploaded file"""
@@ -443,6 +680,54 @@ def main():
 
         return df
 
+
+    @st.cache_data
+    def load_clase_suelo_by_municipality(selected_muni: str):
+        """
+        Carga id, municipality, clasesuelo, geom de dev_codeine."claseSuelo_municipalities"
+        filtrando por nombre de municipio (ILIKE).
+        """
+        try:
+            engine = get_db_connection()
+            sql = '''
+                SELECT id, municipality, clasesuelo, geom
+                FROM dev_codeine."claseSuelo_municipalities"
+                WHERE municipality ILIKE %(municipality)s
+            '''
+            with engine.connect() as conn:
+                gdf = gpd.read_postgis(sql, conn, geom_col="geom", params={"municipality": f"%{selected_muni}%"})
+            return gdf
+        except Exception as e:
+            st.error(f"❌ Error cargando clase de suelo: {e}")
+            return None
+
+
+
+    @st.cache_data
+    def load_sscc_by_municipality(selected_muni: str):
+        """
+        Carga secciones censales del municipio. Intenta dos nombres de tabla comunes:
+        - dev_codeine."Censo_2021_SSCC"
+        - dev_codeine.seccen
+
+        Debe devolver columnas: cusec3, nmun, geom
+        """
+        engine = get_db_connection()
+        # Opción 1: Censo_2021_SSCC
+        sql_opts = [
+            'SELECT "cusec3", "nmun", geom FROM dev_codeine."Censo_2021_SSCC" WHERE "nmun" ILIKE %(m)s',
+            'SELECT "cusec3", "nmun", geom FROM dev_codeine.seccen WHERE "nmun" ILIKE %(m)s',
+        ]
+        for sql in sql_opts:
+            try:
+                with engine.connect() as conn:
+                    gdf = gpd.read_postgis(sql, conn, geom_col="geom", params={"m": f"%{selected_muni}%"})
+                if not gdf.empty:
+                    return gdf
+            except Exception:
+                pass
+        st.error("❌ No pude cargar las secciones censales (revisa el nombre de la tabla/permiso).")
+        return None
 
     def subset_muni_first(df: pd.DataFrame, display_muni: str) -> pd.DataFrame:
         """
@@ -788,22 +1073,167 @@ def main():
                 municipio_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
                 st.write(f"🟫 Superficie del municipio: {municipio_area_ha:,.2f} ha")
 
+
+                # ====== 🔼 SUBIR CAPA TRAS SELECCIONAR MUNICIPIO ======
+                st.markdown("### 📤 Subir capa vectorial para este municipio")
+                
+                uploaded = st.file_uploader(
+                    "Sube ZIP (shapefile), GeoJSON, GML, GPKG o CAT del Catastro",
+                    type=["zip", "geojson", "gml", "gpkg", "cat"],
+                    accept_multiple_files=False,
+                    key="uploader_muni"
+                )
+                
+                def _read_any_vector(fileobj):
+                    """
+                    Devuelve un GeoDataFrame desde:
+                    - ZIP con shapefile (usa tu process_shapefile)
+                    - GeoJSON / GML / GPKG guardando temporalmente y usando GeoPandas
+                    - CAT: intenta como GML; si no, avisa
+                    """
+                    import tempfile, pathlib
+                    suffix = pathlib.Path(fileobj.name).suffix.lower()
+                
+                    if suffix == ".zip":
+                        # usa tu función existente
+                        try:
+                            return process_shapefile(fileobj)
+                        except Exception as e:
+                            st.error(f"❌ No se pudo leer el shapefile del ZIP: {e}")
+                            return None
+                
+                    # Guardar temporalmente para gpd.read_file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(fileobj.getvalue())
+                        tmp_path = tmp.name
+                
+                    try:
+                        if suffix in (".geojson", ".gml", ".gpkg"):
+                            return gpd.read_file(tmp_path)
+                
+                        if suffix == ".cat":
+                            # Heurística: si es GML/XML, gpd puede abrirlo; si no, avisamos
+                            with open(tmp_path, "rb") as f:
+                                head = f.read(4096).lower()
+                            looks_xml = (b"<?xml" in head[:200]) or (b"<gml" in head)
+                            if looks_xml:
+                                return gpd.read_file(tmp_path)
+                            else:
+                                st.warning("El .CAT no parece ser GML/XML legible. Ábrelo en QGIS y exporta a GPKG/SHP.")
+                                return None
+                
+                        st.error("Formato no soportado. Usa ZIP/GeoJSON/GML/GPKG/CAT.")
+                        return None
+                    except Exception as e:
+                        st.error(f"❌ Error leyendo la capa: {e}")
+                        return None
+                
+                if uploaded is not None:
+                    gdf_user = _read_any_vector(uploaded)
+                    if gdf_user is not None and not gdf_user.empty:
+                        # Info básica de la capa subida
+                        display_geodata_info(gdf_user, uploaded.name)
+                
+                        # Recortar contra el municipio (reutiliza tu función perform_spatial_clip)
+                        st.markdown("#### ✂️ Recortar la capa al término municipal")
+                        do_clip = st.toggle("Recortar al municipio", value=True)
+                        if do_clip:
+                            clipped = perform_spatial_clip(gdf_user, gdf_muni)
+                            if clipped is not None and not clipped.empty:
+                                st.success(f"✅ Recorte hecho. Geometrías resultantes: {len(clipped)}")
+                                gdf_to_show = clipped
+                            else:
+                                st.info("No hubo intersección con el municipio (o resultó vacío). Mostrando capa original.")
+                                gdf_to_show = gdf_user
+                        else:
+                            gdf_to_show = gdf_user
+                
+                        # Mapa rápido con Folium (reutiliza tu creador de mapas)
+                        st.markdown("#### 🗺️ Vista rápida en mapa")
+                        try:
+                            m_user = create_folium_map(gdf_to_show, map_title=f"Capa: {uploaded.name}")
+                            st_folium(m_user, width=1200, height=500, key="map_user_layer")
+                        except Exception as e:
+                            st.warning(f"No se pudo renderizar el mapa: {e}")
+                
+                        # Exportadores (reutiliza tu export_geodata)
+                        st.markdown("#### ⬇️ Exportar resultados")
+                        colx, coly, colz = st.columns(3)
+                        with colx:
+                            data, fname, mime = export_geodata(gdf_to_show, "capa_municipio", "GeoJSON")
+                            if data:
+                                st.download_button("Descargar GeoJSON", data, fname, mime)
+                        with coly:
+                            data, fname, mime = export_geodata(gdf_to_show, "capa_municipio", "Shapefile")
+                            if data:
+                                st.download_button("Descargar Shapefile (.zip)", data, fname, mime)
+                        with colz:
+                            data, fname, mime = export_geodata(gdf_to_show, "capa_municipio", "CSV")
+                            if data:
+                                st.download_button("Descargar CSV (atributos)", data, fname, mime)
+                
+
+
+                # 3) --- Bloque SIU + D03b: limpia el else y evita el else del try/except ---
                 gdf_all_codsiu = load_internal_bases_all_codsiu(selected_muni)
 
-                # Recorte general para todos los CODSIU
                 if gdf_all_codsiu is not None:
                     gdf_all_clipped = perform_spatial_clip(gdf_all_codsiu, gdf_muni)
                     if gdf_all_clipped is not None and not gdf_all_clipped.empty:
                         gdf_all_clipped["CODSIU"] = gdf_all_clipped["CODSIU"].astype(int)
-                        for cod in [9, 12, 14, 16, 18]:                        
+                        for cod in [9, 12, 14, 15, 16, 17, 18, 19]:
                             subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == cod]
-                            if not subset.empty:
-                                estal_sum = subset["estal"].sum()
-                                st.session_state[f"sup_cultivos_{cod:02d}"] = estal_sum
-                            else:
-                                st.session_state[f"sup_cultivos_{cod:02d}"] = None                                
+                            st.session_state[f"sup_cultivos_{cod:02d}"] = subset["estal"].sum() if not subset.empty else None
+                    else:
+                        # si no hay recorte, limpia para no arrastrar valores de otro municipio
+                        for cod in [9, 12, 14, 15, 16, 17, 18, 19]:
+                            st.session_state[f"sup_cultivos_{cod:02d}"] = None
                 else:
-                    st.info("ℹ️ No se encontró geometría para este municipio o falló la carga.")
+                    st.info("ℹ️ No se encontró geometría SIU para este municipio o falló la carga.")
+                    for cod in [9, 12, 14, 15, 16, 17, 18, 19]:
+                        st.session_state[f"sup_cultivos_{cod:02d}"] = None
+
+                # --- Calcula D03b solo para la tabla ---
+                d03b_value = None
+                try:
+                    if gdf_muni is not None and not gdf_muni.empty and gdf_all_codsiu is not None:
+                        res03b = compute_d03b_municipal(selected_muni, gdf_muni, gdf_all_codsiu)
+                        if res03b:
+                            d03b_value = res03b["d03b"]
+                except Exception:
+                    d03b_value = None
+
+
+
+                # --- Calcula D04 municipal una vez (como haces con D03b) ---
+                d04_value = None
+                try:
+                    if gdf_muni is not None and not gdf_muni.empty:
+                        res04 = compute_d04_municipal_by_muni(selected_muni, gdf_muni)
+                        if res04:
+                            d04_value = res04["d04"]
+                except Exception as e:
+                    st.error(f"Error calculando D.04: {e}")
+                    import traceback; st.code(traceback.format_exc())
+                    d04_value = None
+
+                # --- Calcula D.02.a (CORINE) en PostGIS ---
+                d02a_corine_value = None
+                try:
+                    if gdf_muni is not None and not gdf_muni.empty:
+                        res02a = compute_d02a_municipal_postgis(selected_muni, gdf_muni)
+                        if res02a:
+                            d02a_corine_value = res02a["d02a_pct"]
+                except Exception as e:
+                    st.error(f"Error D.02.a CORINE: {e}")
+                    d02a_corine_value = None
+
+
+
+
+
+                
+                
 
             if pop_df.empty:
                 st.error("❌ No se encontraron datos para el municipio seleccionado.")
@@ -897,6 +1327,7 @@ def main():
 
                 # --- Indicadores DGT por año ---
                 veh_1000hab, pct_turismos, pct_motos = None, None, None
+                antig_media = None 
                 try:
                     df_dgt_year = df_dgt_by_year.get(year)
                     if df_dgt_year is not None:
@@ -950,6 +1381,8 @@ def main():
                     "D.34 Vivienda secundaria (%)": None,
                     "D.35 Vivienda vacía 2011 (%)": viv_vacia_pct_2011 if year == "2021" else None,
                 }
+            
+                row["D.02.a (CORINE) Superficie artificial (%)"] = d02a_corine_value
                 # Indicador nuevo: Superficie cultivos código16 / superficie municipio
                 try:
                     if (
@@ -958,7 +1391,9 @@ def main():
                         gdf_muni is not None and 
                         not gdf_muni.empty
                     ):
-                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+   
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+
                         if muni_area_ha > 0:
                             pct16 = round((st.session_state["sup_cultivos_16"] / muni_area_ha) * 100, 2)
                             row["D.02.b. Superficie de Cultivos (cod_16)"] = pct16
@@ -968,6 +1403,66 @@ def main():
                         row["D.02.b. Superficie de Cultivos (cod_16)"] = None
                 except:
                     row["D.02.b. Superficie de Cultivos (cod_16)"] = None
+
+                # Indicador nuevo: Superficie cultivos código19 / superficie municipio
+                try:
+                    if (
+                        "sup_cultivos_19" in st.session_state and 
+                        st.session_state["sup_cultivos_19"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+
+                        if muni_area_ha > 0:
+                            pct19 = round((st.session_state["sup_cultivos_19"] / muni_area_ha) * 100, 2)
+                            row["D.02.c. Superficie de zonas húmedas (%) (cod_19)"] = pct19
+                        else:
+                            row["D.02.c. Superficie de zonas húmedas (%) (cod_19)"] = None
+                    else:
+                        row["D.02.c. Superficie de zonas húmedas (%) (cod_19)"] = None
+                except Exception:
+                    row["D.02.c. Superficie de zonas húmedas (%) (cod_19)"] = None
+
+                
+                try:
+                    if (
+                        "sup_cultivos_17" in st.session_state and 
+                        st.session_state["sup_cultivos_17"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+
+                        if muni_area_ha > 0:
+                            pct17 = round((st.session_state["sup_cultivos_17"] / muni_area_ha) * 100, 2)
+                            row["D.02.d. Superficie forestal (%) (cod_17)"] = pct17
+                        else:
+                            row["D.02.d. Superficie forestal (%) (cod_17)"] = None
+                    else:
+                        row["D.02.d. Superficie forestal (%) (cod_17)"] = None
+                except Exception:
+                    row["D.02.d. Superficie forestal (%) (cod_17)"] = None
+
+
+                try:
+                    if (
+                        "sup_cultivos_15" in st.session_state and 
+                        st.session_state["sup_cultivos_15"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+
+                        if muni_area_ha > 0:
+                            pct15 = round((st.session_state["sup_cultivos_15"] / muni_area_ha) * 100, 2)
+                            row["D.02.e. Superficie minería (%) (cod_15)"] = pct15
+                        else:
+                            row["D.02.e. Superficie minería (%) (cod_15)"] = None
+                    else:
+                        row["D.02.e. Superficie minería (%) (cod_15)"] = None
+                except Exception:
+                    row["D.02.e. Superficie minería (%) (cod_15)"] = None
 
                 if (
                     "sup_cultivos_09" in st.session_state and 
@@ -987,16 +1482,16 @@ def main():
                         gdf_muni is not None and 
                         not gdf_muni.empty
                     ):
-                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
                         if muni_area_ha > 0:
                             sup14_pct = round((st.session_state["sup_cultivos_14"] / muni_area_ha) * 100, 2)
-                            row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = sup14_pct
+                            row["D.03.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = sup14_pct
                         else:
-                            row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
+                            row["D.03.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
                     else:
-                        row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
+                        row["D.03.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
                 except:
-                    row["D.3.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
+                    row["D.03.a. Superficie municipal de explotaciones agrarias y forestales (cod_14)"] = None
 
                 # Indicadores para código 12
                 try:
@@ -1033,26 +1528,13 @@ def main():
                     except:
                         pass
                 
+               
+                row["D.03.b. % COD14 sobre Suelo Urb./Urbanizable"] = d03b_value
+                row["D.04. % SNU + SUD no delimitado sobre municipio"] = d04_value
 
-                # Indicador nuevo: Superficie cultivos código16 / superficie municipio
-                try:
-                    if (
-                        "sup_cultivos_18" in st.session_state and 
-                        st.session_state["sup_cultivos_18"] is not None and
-                        gdf_muni is not None and 
-                        not gdf_muni.empty
-                    ):
-                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
-                        if muni_area_ha > 0:
-                            pct16 = round((st.session_state["sup_cultivos_18"] / muni_area_ha) * 100, 2)
-                            row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = pct16
-                        else:
-                            row["D.02.a. Superficie de Cobertura Artificial (cod_18)    "] = None
-                    else:
-                        row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
-                except:
-                    row["D.02.a. Superficie de Cobertura Artificial (cod_18)"] = None
 
+
+                
 
 
                 # --- D.26: % trabajadores por sector (media anual SEPE Contratos) ---
@@ -1166,10 +1648,10 @@ def main():
                     
                     # Generar paleta de colores
                     unique_codsiu = sorted(gdf_all_clipped["CODSIU"].unique())
-                    color_map = plt.get_cmap('tab20', len(unique_codsiu))  # 20 colores
-                    codsiu_to_color = {
-                        cod: matplotlib.colors.rgb2hex(color_map(i)) for i, cod in enumerate(unique_codsiu)
-                    }
+
+                    from matplotlib import cm, colors
+                    cmap = cm.get_cmap('tab20', len(unique_codsiu))
+                    codsiu_to_color = {cod: colors.to_hex(cmap(i)) for i, cod in enumerate(unique_codsiu)}
                 
                     for codsiu in unique_codsiu:
                         subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == codsiu]
@@ -1202,6 +1684,103 @@ def main():
                 
 
                 st_folium(m, width=1500, height=500, key="map_municipio_expandido")
+
+
+                # ===================== MAPA 2: Intersecciones de Clase de Suelo =====================
+                st.markdown("### 🗺️ Intersecciones: Clase de Suelo en el municipio")
+                
+                if selected_muni and gdf_muni is not None and not gdf_muni.empty:
+                    gdf_clase = load_clase_suelo_by_municipality(selected_muni)
+                
+                    if gdf_clase is None or gdf_clase.empty:
+                        st.info("ℹ️ No se encontraron registros de clase de suelo para este municipio.")
+                    else:
+                        # 1) Intersección/recorte con el término municipal (usa tu helper)
+                        gdf_clase_clip = perform_spatial_clip(gdf_clase, gdf_muni)
+                
+                        if gdf_clase_clip is None or gdf_clase_clip.empty:
+                            st.warning("⚠️ La capa de clase de suelo no intersecta con el municipio (resultado vacío).")
+                        else:
+                            # 2) Detectar una columna de categoría para colorear el mapa
+                            #    Ajusta la prioridad a tus nombres reales si ya los sabes.
+                            candidate_cols = [
+                                "clase_suelo", "clase", "clas_suelo", "Clase", "tipo", "category", "Tipo", "uso"
+                            ]
+                            category_col = next((c for c in candidate_cols if c in gdf_clase_clip.columns), None)
+                
+                            # 3) Pasar a WGS84 para webmapping
+                            gdf_muni_4326  = gdf_muni.to_crs(4326)
+                            gdf_clase_4326 = gdf_clase_clip.to_crs(4326)
+                
+                            # 4) Construir mapa
+                            bounds = gdf_muni_4326.total_bounds
+                            center_lat = (bounds[1] + bounds[3]) / 2
+                            center_lon = (bounds[0] + bounds[2]) / 2
+                            m2 = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
+                
+                            # Capa del municipio en borde
+                            folium.GeoJson(
+                                gdf_muni_4326.__geo_interface__,
+                                name="Municipio",
+                                style_function=lambda f: {"color": "black", "weight": 2, "fillOpacity": 0.0}
+                            ).add_to(m2)
+                
+                            # 5) Coloreado por categoría (si existe) o color único
+                            import matplotlib
+                            import matplotlib.pyplot as plt
+                
+                            if category_col:
+                                unique_vals = [str(v) for v in gdf_clase_4326[category_col].fillna("SIN_CATEGORIA").unique()]
+                                from matplotlib import cm, colors
+                                cmap = cm.get_cmap("tab20", len(unique_vals))
+                                lut = {val: colors.to_hex(cmap(i)) for i, val in enumerate(sorted(unique_vals))}
+                                
+                                def styler(feat):
+                                    val = str(feat["properties"].get(category_col, "SIN_CATEGORIA"))
+                                    return {"color": lut.get(val, "#555555"), "fillColor": lut.get(val, "#555555"),
+                                            "weight": 1, "fillOpacity": 0.5}
+                
+                                gj = folium.GeoJson(
+                                    gdf_clase_4326.__geo_interface__,
+                                    name="Clase de suelo (intersecciones)",
+                                    style_function=styler,
+                                    tooltip=folium.GeoJsonTooltip(
+                                        fields=[category_col] + [c for c in gdf_clase_4326.columns if c not in ("geometry","geom")][:5],
+                                        aliases=[category_col] + ["Atributo 1", "Atributo 2", "Atributo 3", "Atributo 4", "Atributo 5"],
+                                        sticky=True
+                                    ),
+                                ).add_to(m2)
+                
+                                # Leyenda simple
+                                legend_html = """
+                                <div style="position: fixed; bottom: 30px; left: 30px; z-index: 9999; 
+                                            background: white; padding: 8px 10px; border: 1px solid #ccc; 
+                                            border-radius: 6px; font-size: 12px; max-height: 220px; overflow:auto;">
+                                    <b>Clase de suelo</b><br>
+                                """
+                                for val in sorted(unique_vals):
+                                    legend_html += f'<div style="margin:3px 0;"><span style="display:inline-block;width:12px;height:12px;background:{lut[val]};margin-right:6px;border:1px solid #999;"></span>{val}</div>'
+                                legend_html += "</div>"
+                                m2.get_root().html.add_child(folium.Element(legend_html))
+                
+                            else:
+                                # Sin categoría detectable: pintar uniforme
+                                folium.GeoJson(
+                                    gdf_clase_4326.__geo_interface__,
+                                    name="Clase de suelo (intersecciones)",
+                                    style_function=lambda f: {"color": "#377eb8", "fillColor": "#377eb8",
+                                                              "weight": 1, "fillOpacity": 0.5},
+                                    tooltip=folium.GeoJsonTooltip(
+                                        fields=[c for c in gdf_clase_4326.columns if c not in ("geometry","geom")][:6],
+                                        aliases=["Campo 1","Campo 2","Campo 3","Campo 4","Campo 5","Campo 6"],
+                                        sticky=True
+                                    ),
+                                ).add_to(m2)
+                
+                            folium.LayerControl(collapsed=False).add_to(m2)
+                            st_folium(m2, width=1500, height=520, key="map_clase_suelo")            
+                else:
+                    st.info("Selecciona un municipio para ver la clase de suelo.")
 
             
             # -------------------- HISTORICAL POPULATION GRAPH --------------------
@@ -1327,6 +1906,47 @@ def main():
             show_d26_debug(df_sepe_all, selected_muni)
         except Exception as e:
             st.error(f"No se pudo generar la depuración D.26: {e}")
+
+    
+
+    # ===================== TABLA: área por tipo de suelo (solo tabla) =====================
+    st.markdown("### 📋 Área por tipo de suelo (ha)")
+
+    if selected_muni and gdf_muni is not None and not gdf_muni.empty:
+        gdf_clase = load_clase_suelo_by_municipality(selected_muni)
+
+        if gdf_clase is None or gdf_clase.empty:
+            st.info("ℹ️ No se encontraron registros de clase de suelo para este municipio.")
+        else:
+            # Recorte al término municipal
+            gdf_clip = perform_spatial_clip(gdf_clase, gdf_muni)
+            if gdf_clip is None or gdf_clip.empty:
+                st.warning("⚠️ La capa de clase de suelo no intersecta con el municipio.")
+            else:
+                # Asegurar área en hectáreas
+                if "area_ha" not in gdf_clip.columns:
+                    area_m2 = calculate_ellipsoidal_area(gdf_clip.to_crs(4326))
+                    gdf_clip["area_ha"] = [a / 10000 for a in area_m2]
+
+                # Columna de categoría (ajústala si conoces el nombre exacto)
+                CATEGORY_COL = "clasesuelo"  # ← si este es tu campo real
+                # 1) Dissolve por categoría (evita dobles conteos de solapes)
+                gdf_diss = (
+                    gdf_clip.assign(_cat=gdf_clip[CATEGORY_COL].fillna("SIN_CATEGORIA").astype(str))
+                            .dissolve(by="_cat", as_index=False)
+                )
+                # 2) Área elipsoidal sobre la geometría disuelta
+                gdf_diss_wgs84 = gdf_diss.to_crs(4326)
+                area_m2 = calculate_ellipsoidal_area(gdf_diss_wgs84)
+                gdf_diss["Área (ha)"] = [a/10000 for a in area_m2]
+                # 3) Tabla ordenada
+                tabla = gdf_diss[["_cat","Área (ha)"]].rename(columns={"_cat":"Tipo de suelo"}).sort_values("Área (ha)", ascending=False)
+                st.dataframe(tabla, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("Selecciona un municipio para ver la tabla de tipos de suelo.")
+
+
 
 
 
