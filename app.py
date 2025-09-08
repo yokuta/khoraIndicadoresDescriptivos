@@ -258,7 +258,7 @@ def main():
             area_cod14_ha = siu14_clip.geometry.area.sum() / 10000.0 if not siu14_clip.empty else 0.0
 
             # --- Denominador: Clase de suelo urbana/urbanizable, recortada al municipio ---
-            gdf_clase = load_clase_suelo_by_municipality(selected_muni)
+            gdf_clase = load_clase_suelo_by_municipality_v2(selected_muni)
             if gdf_clase is None or gdf_clase.empty:
                 st.warning("No hay clase de suelo para el municipio (consulta vacía).")
                 return {
@@ -329,7 +329,7 @@ def main():
         muni_wgs = gdf_muni.to_crs(4326)
         area_muni_ha = sum(calculate_ellipsoidal_area(muni_wgs)) / 10000.0
 
-        gdf_clase = load_clase_suelo_by_municipality(selected_muni)
+        gdf_clase = load_clase_suelo_by_municipality_v2(selected_muni)
         if gdf_clase is None or gdf_clase.empty:
             return {"d04": 0.0 if area_muni_ha > 0 else None,
                     "area_obj_ha": 0.0,
@@ -455,8 +455,33 @@ def main():
             return {"d02a_pct": None, "area_corine_ha": 0.0, "area_muni_ha": 0.0}
 
 
+    @st.cache_data
+    def load_siu_recintos_by_municipality(selected_muni: str):
+        """
+        Carga CODSIU/descripcion/geom de dev_codeine.siu_recintos_municipalities
+        filtrando por municipality ILIKE %<nombre>%.
+        Devuelve GeoDataFrame con geometry estandarizada.
+        """
+        try:
+            engine = get_db_connection()
+            sql = """
+                SELECT id, municipality, usosuelo, geom
+                FROM dev_codeine.siu_recintos_municipalities
+                WHERE municipality ILIKE %(m)s
+            """
+            with engine.connect() as conn:
+                gdf = gpd.read_postgis(sql, conn, geom_col="geom", params={"m": f"%{selected_muni}%"})
+            if not gdf.empty:
+                # normaliza columna geometry
+                if gdf.geometry.name != "geom":
+                    gdf = gdf.set_geometry(gdf.geometry.name)
+                gdf = gdf.rename_geometry("geometry")
+            return gdf
+        except Exception as e:
+            st.error(f"❌ Error cargando SIU recintos: {e}")
+            return None
 
-
+   
     def display_file_info(uploaded_file, df):
         """Display information about the uploaded file"""
         st.success(f"✅ Archivo cargado: **{uploaded_file.name}**")
@@ -682,25 +707,143 @@ def main():
 
 
     @st.cache_data
-    def load_clase_suelo_by_municipality(selected_muni: str):
+    def load_clase_suelo_by_municipality_v2(selected_muni: str):
         """
-        Carga id, municipality, clasesuelo, geom de dev_codeine."claseSuelo_municipalities"
-        filtrando por nombre de municipio (ILIKE).
+        dev_codeine.clase_suelo_municipalities: id, municipality, geom, clasesuelo
         """
         try:
             engine = get_db_connection()
-            sql = '''
-                SELECT id, municipality, clasesuelo, geom
-                FROM dev_codeine."claseSuelo_municipalities"
-                WHERE municipality ILIKE %(municipality)s
-            '''
+            sql = """
+                SELECT id, municipality, geom, clasesuelo
+                FROM dev_codeine.clase_suelo_municipalities
+                WHERE municipality ILIKE %(m)s
+            """
             with engine.connect() as conn:
-                gdf = gpd.read_postgis(sql, conn, geom_col="geom", params={"municipality": f"%{selected_muni}%"})
+                gdf = gpd.read_postgis(sql, conn, geom_col="geom", params={"m": f"%{selected_muni}%"})
+            if not gdf.empty:
+                # standardize geometry name to 'geometry'
+                if gdf.geometry.name != "geom":
+                    gdf = gdf.set_geometry(gdf.geometry.name)
+                gdf = gdf.rename_geometry("geometry")
             return gdf
         except Exception as e:
             st.error(f"❌ Error cargando clase de suelo: {e}")
             return None
 
+
+    @st.cache_data
+    def load_siu_recintos_by_municipality(selected_muni: str):
+        """
+        dev_codeine.siu_recintos_municipalities: id, municipality, geom, usosuelo
+        """
+        try:
+            engine = get_db_connection()
+            sql = """
+                SELECT id, municipality, geom, usosuelo
+                FROM dev_codeine.siu_recintos_municipalities
+                WHERE municipality ILIKE %(m)s
+            """
+            with engine.connect() as conn:
+                gdf = gpd.read_postgis(sql, conn, geom_col="geom", params={"m": f"%{selected_muni}%"})
+            if not gdf.empty:
+                if gdf.geometry.name != "geom":
+                    gdf = gdf.set_geometry(gdf.geometry.name)
+                gdf = gdf.rename_geometry("geometry")
+            return gdf
+        except Exception as e:
+            st.error(f"❌ Error cargando SIU recintos: {e}")
+            return None
+
+    def build_clase_siu_area_and_intersection(selected_muni: str, gdf_muni: gpd.GeoDataFrame):
+        """
+        Returns dict with:
+        - 'tabla_clase'  : DataFrame (clasesuelo, Área (ha))
+        - 'tabla_siu'    : DataFrame (usosuelo, Área (ha))
+        - 'tabla_long'   : DataFrame (usosuelo, clasesuelo, Área (ha))
+        - 'matriz_pivot' : DataFrame pivot (rows=usosuelo, cols=clasesuelo, values ha)
+        All areas computed ellipsoidally using calculate_ellipsoidal_area on WGS84.
+        """
+        if gdf_muni is None or gdf_muni.empty:
+            return {"tabla_clase": None, "tabla_siu": None, "tabla_long": None, "matriz_pivot": None}
+
+        # Load tables
+        gdf_clase = load_clase_suelo_by_municipality_v2(selected_muni)
+        gdf_siu   = load_siu_recintos_by_municipality(selected_muni)
+
+        if (gdf_clase is None or gdf_clase.empty) and (gdf_siu is None or gdf_siu.empty):
+            return {"tabla_clase": None, "tabla_siu": None, "tabla_long": None, "matriz_pivot": None}
+
+        # Clip to municipality
+        gdf_clase_clip = perform_spatial_clip(gdf_clase, gdf_muni) if (gdf_clase is not None and not gdf_clase.empty) else None
+        gdf_siu_clip   = perform_spatial_clip(gdf_siu,   gdf_muni) if (gdf_siu   is not None and not gdf_siu.empty)   else None
+
+        # --- Tabla 1: área por clasesuelo ---
+        tabla_clase = None
+        if gdf_clase_clip is not None and not gdf_clase_clip.empty:
+            gdfC = gdf_clase_clip.copy()
+            gdfC["_cat"] = gdfC["clasesuelo"].fillna("SIN_CATEGORIA").astype(str)
+            gdfC_dis = gdfC.dissolve(by="_cat", as_index=False)
+            area_m2 = calculate_ellipsoidal_area(gdfC_dis.to_crs(4326))
+            gdfC_dis["Área (ha)"] = [a/10000 for a in area_m2]
+            tabla_clase = (gdfC_dis[["_cat","Área (ha)"]]
+                        .rename(columns={"_cat":"clasesuelo"})
+                        .sort_values("Área (ha)", ascending=False)
+                        .reset_index(drop=True))
+
+        # --- Tabla 2: área por usosuelo (SIU) ---
+        tabla_siu = None
+        if gdf_siu_clip is not None and not gdf_siu_clip.empty:
+            gdfS = gdf_siu_clip.copy()
+            gdfS["_uso"] = gdfS["usosuelo"].fillna("SIN_USO").astype(str)
+            # dissolve by use (avoid overlaps double counting)
+            gdfS_dis = gdfS.dissolve(by="_uso", as_index=False)
+            area_m2 = calculate_ellipsoidal_area(gdfS_dis.to_crs(4326))
+            gdfS_dis["Área (ha)"] = [a/10000 for a in area_m2]
+            tabla_siu = (gdfS_dis[["_uso","Área (ha)"]]
+                        .rename(columns={"_uso":"usosuelo"})
+                        .sort_values("Área (ha)", ascending=False)
+                        .reset_index(drop=True))
+
+        # --- Tabla 3: intersección usosuelo × clasesuelo ---
+        tabla_long = None
+        matriz_pivot = None
+        if (gdf_clase_clip is not None and not gdf_clase_clip.empty) and (gdf_siu_clip is not None and not gdf_siu_clip.empty):
+            # Work in metric CRS for overlay robustness, then compute area ellipsoidally
+            crs_metric = gdf_muni.crs or "EPSG:25830"
+            A = gdf_siu_clip if (gdf_siu_clip.crs and gdf_siu_clip.crs.to_string() == crs_metric) else gdf_siu_clip.to_crs(crs_metric)
+            B = gdf_clase_clip if (gdf_clase_clip.crs and gdf_clase_clip.crs.to_string() == crs_metric) else gdf_clase_clip.to_crs(crs_metric)
+
+            # Keep only needed columns
+            Ause = A[["usosuelo","geometry"]].copy()
+            Bcla = B[["clasesuelo","geometry"]].copy()
+
+            inter = gpd.overlay(Ause, Bcla, how="intersection", keep_geom_type=True)
+            if not inter.empty:
+                # dissolve by (usosuelo, clasesuelo) to avoid slivers being summed twice
+                inter_dis = inter.dissolve(by=["usosuelo","clasesuelo"], as_index=False)
+                inter_wgs = inter_dis.to_crs(4326)
+                area_m2 = calculate_ellipsoidal_area(inter_wgs)
+                inter_dis["Área (ha)"] = [a/10000 for a in area_m2]
+
+                tabla_long = (inter_dis[["usosuelo","clasesuelo","Área (ha)"]]
+                            .sort_values(["usosuelo","Área (ha)"], ascending=[True, False])
+                            .reset_index(drop=True))
+
+                # Pivot matrix (usosuelo x clasesuelo)
+                try:
+                    matriz_pivot = (tabla_long
+                        .pivot_table(index="usosuelo", columns="clasesuelo", values="Área (ha)",
+                                    aggfunc="sum", fill_value=0.0)
+                        .sort_index())
+                except Exception:
+                    matriz_pivot = None
+
+        return {
+            "tabla_clase": tabla_clase,
+            "tabla_siu": tabla_siu,
+            "tabla_long": tabla_long,
+            "matriz_pivot": matriz_pivot
+        }
 
 
     @st.cache_data
@@ -1181,16 +1324,16 @@ def main():
                     gdf_all_clipped = perform_spatial_clip(gdf_all_codsiu, gdf_muni)
                     if gdf_all_clipped is not None and not gdf_all_clipped.empty:
                         gdf_all_clipped["CODSIU"] = gdf_all_clipped["CODSIU"].astype(int)
-                        for cod in [9, 12, 14, 15, 16, 17, 18, 19]:
+                        for cod in [1, 2, 3, 9, 12, 14, 15, 16, 17, 18, 19]:
                             subset = gdf_all_clipped[gdf_all_clipped["CODSIU"] == cod]
                             st.session_state[f"sup_cultivos_{cod:02d}"] = subset["estal"].sum() if not subset.empty else None
                     else:
                         # si no hay recorte, limpia para no arrastrar valores de otro municipio
-                        for cod in [9, 12, 14, 15, 16, 17, 18, 19]:
+                        for cod in [1, 2, 3, 9, 12, 14, 15, 16, 17, 18, 19]:
                             st.session_state[f"sup_cultivos_{cod:02d}"] = None
                 else:
                     st.info("ℹ️ No se encontró geometría SIU para este municipio o falló la carga.")
-                    for cod in [9, 12, 14, 15, 16, 17, 18, 19]:
+                    for cod in [1, 2, 3, 9, 12, 14, 15, 16, 17, 18, 19]:
                         st.session_state[f"sup_cultivos_{cod:02d}"] = None
 
                 # --- Calcula D03b solo para la tabla ---
@@ -1229,9 +1372,71 @@ def main():
                     d02a_corine_value = None
 
 
+                
+            # === SUC / ADC / SUCADCtotal (hectáreas) ===
+            # Uses: load_clase_suelo_by_municipality_v2, load_siu_recintos_by_municipality,
+            #       perform_spatial_clip, calculate_ellipsoidal_area
 
+            # Normalizer (uppercase, remove accents, collapse spaces)
+            import unicodedata as _u, re as _re
+            def _norm_txt(_s):
+                if pd.isna(_s): return ""
+                _s = str(_s).strip()
+                _s = "".join(c for c in _u.normalize("NFKD", _s) if _u.category(c) != "Mn")
+                _s = _re.sub(r"\s+", " ", _s.upper())
+                return _s
 
+            # 1) Load & clip both layers
+            gdf_clase = load_clase_suelo_by_municipality_v2(selected_muni)
+            gdf_siu   = load_siu_recintos_by_municipality(selected_muni)
 
+            gdf_clase_clip = perform_spatial_clip(gdf_clase, gdf_muni) if (gdf_clase is not None and not gdf_clase.empty) else None
+            gdf_siu_clip   = perform_spatial_clip(gdf_siu,   gdf_muni) if (gdf_siu   is not None and not gdf_siu.empty)   else None
+
+            # 2) SUC: SUELO URBANO (en clasesuelo)
+            SUC_ha = 0.0
+            if gdf_clase_clip is not None and not gdf_clase_clip.empty and "clasesuelo" in gdf_clase_clip.columns:
+                gC = gdf_clase_clip.copy()
+                gC["_clase_norm"] = gC["clasesuelo"].apply(_norm_txt)
+                gC_urb = gC[gC["_clase_norm"] == "SUELO URBANO"].copy()
+                if not gC_urb.empty:
+                    gC_urb = gC_urb.dissolve().explode(index_parts=False)
+                    area_m2 = calculate_ellipsoidal_area(gC_urb.to_crs(4326))
+                    SUC_ha = sum(a/10000 for a in area_m2)
+
+            # 3) ADC: suma de usos en usosuelo
+            ADC_ha = 0.0
+            ADC_SET = {
+                "DESARROLLO CONSOLIDADO",
+                "SUELO EDIFICADO",
+                "SUELO EN PROCESO DE EDIFICACION",
+                "SUELO URBANIZADO O EN PROCESO DE URBANIZACION",
+            }
+            if gdf_siu_clip is not None and not gdf_siu_clip.empty and "usosuelo" in gdf_siu_clip.columns:
+                gS = gdf_siu_clip.copy()
+                gS["_uso_norm"] = gS["usosuelo"].apply(_norm_txt)
+                target_norms = {_norm_txt(x) for x in ADC_SET}
+                gS_adc = gS[gS["_uso_norm"].isin(target_norms)].copy()
+                if not gS_adc.empty:
+                    gS_adc = gS_adc.dissolve().explode(index_parts=False)
+                    area_m2 = calculate_ellipsoidal_area(gS_adc.to_crs(4326))
+                    ADC_ha = sum(a/10000 for a in area_m2)
+
+            # 4) Total
+            SUCADCtotal_ha = SUC_ha + ADC_ha
+
+            # Store/print
+            st.session_state["SUC_ha"] = round(SUC_ha, 2)
+            st.session_state["ADC_ha"] = round(ADC_ha, 2)
+            st.session_state["SUCADCtotal_ha"] = round(SUCADCtotal_ha, 2)
+            
+            """
+            st.markdown("### 🧮 SUC / ADC / Total (ha)")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("SUC (ha) – SUELO URBANO", f"{st.session_state['SUC_ha']:,}")
+            c2.metric("ADC (ha) – usos seleccionados", f"{st.session_state['ADC_ha']:,}")
+            c3.metric("SUC + ADC (ha)", f"{st.session_state['SUCADCtotal_ha']:,}")
+            """
                 
                 
 
@@ -1532,6 +1737,41 @@ def main():
                 row["D.03.b. % COD14 sobre Suelo Urb./Urbanizable"] = d03b_value
                 row["D.04. % SNU + SUD no delimitado sobre municipio"] = d04_value
 
+                # D.06 municipal = población INE del año / (SUC + ADC) [ha]
+                sucadc_ha = st.session_state.get("SUCADCtotal_ha")  # set earlier when you computed SUC/ADC
+                row["D.06 Densidad sobre SUC+ADC (hab/ha)"] = (
+                    round(total / sucadc_ha, 2) if (total and sucadc_ha and sucadc_ha > 0) else None
+                )
+
+                # Indicador nuevo: Superficie cultivos código19 / superficie municipio
+                try:
+                    if (
+                        "sup_cultivos_03" in st.session_state and 
+                        "sup_cultivos_02" in st.session_state and 
+                        "sup_cultivos_01" in st.session_state and 
+                        st.session_state["sup_cultivos_03"] is not None and
+                        st.session_state["sup_cultivos_02"] is not None and
+                        st.session_state["sup_cultivos_01"] is not None and
+                        gdf_muni is not None and 
+                        not gdf_muni.empty
+                    ):
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+
+                        if muni_area_ha > 0:
+                            print("HOLASDADSA")
+                            pct3 = round(st.session_state["sup_cultivos_03"], 2)
+                            print(pct3)
+                            pct2 = round(st.session_state["sup_cultivos_02"], 2)
+                            print(pct2)
+                            pct1 = round(st.session_state["sup_cultivos_01"], 2)
+                            print(pct1)
+                            row["D.07. Suelo urbano discontinuo (%)"] = pct3*100/(pct3+pct1+pct2)
+                        else:
+                            row["D.07. Suelo urbano discontinuo (%)"] = None
+                    else:
+                        row["D.07. Suelo urbano discontinuo (%)"] = None
+                except Exception:
+                    row["D.07. Suelo urbano discontinuo (%)"] = None
 
 
                 
@@ -1690,8 +1930,8 @@ def main():
                 st.markdown("### 🗺️ Intersecciones: Clase de Suelo en el municipio")
                 
                 if selected_muni and gdf_muni is not None and not gdf_muni.empty:
-                    gdf_clase = load_clase_suelo_by_municipality(selected_muni)
-                
+                    gdf_clase = load_clase_suelo_by_municipality_v2(selected_muni)
+                    
                     if gdf_clase is None or gdf_clase.empty:
                         st.info("ℹ️ No se encontraron registros de clase de suelo para este municipio.")
                     else:
@@ -1909,46 +2149,38 @@ def main():
 
     
 
-    # ===================== TABLA: área por tipo de suelo (solo tabla) =====================
-    st.markdown("### 📋 Área por tipo de suelo (ha)")
+    st.markdown("### 📋 Áreas (ha) y 🔀 Intersección **usosuelo × clasesuelo**")
 
     if selected_muni and gdf_muni is not None and not gdf_muni.empty:
-        gdf_clase = load_clase_suelo_by_municipality(selected_muni)
+        out = build_clase_siu_area_and_intersection(selected_muni, gdf_muni)
 
-        if gdf_clase is None or gdf_clase.empty:
-            st.info("ℹ️ No se encontraron registros de clase de suelo para este municipio.")
-        else:
-            # Recorte al término municipal
-            gdf_clip = perform_spatial_clip(gdf_clase, gdf_muni)
-            if gdf_clip is None or gdf_clip.empty:
-                st.warning("⚠️ La capa de clase de suelo no intersecta con el municipio.")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Clase de Suelo (ha)")
+            if out["tabla_clase"] is None or out["tabla_clase"].empty:
+                st.info("Sin datos de clase de suelo (o sin intersección).")
             else:
-                # Asegurar área en hectáreas
-                if "area_ha" not in gdf_clip.columns:
-                    area_m2 = calculate_ellipsoidal_area(gdf_clip.to_crs(4326))
-                    gdf_clip["area_ha"] = [a / 10000 for a in area_m2]
+                st.dataframe(out["tabla_clase"], use_container_width=True, hide_index=True)
+                st.caption(f"Total: **{out['tabla_clase']['Área (ha)'].sum():,.2f} ha**")
 
-                # Columna de categoría (ajústala si conoces el nombre exacto)
-                CATEGORY_COL = "clasesuelo"  # ← si este es tu campo real
-                # 1) Dissolve por categoría (evita dobles conteos de solapes)
-                gdf_diss = (
-                    gdf_clip.assign(_cat=gdf_clip[CATEGORY_COL].fillna("SIN_CATEGORIA").astype(str))
-                            .dissolve(by="_cat", as_index=False)
-                )
-                # 2) Área elipsoidal sobre la geometría disuelta
-                gdf_diss_wgs84 = gdf_diss.to_crs(4326)
-                area_m2 = calculate_ellipsoidal_area(gdf_diss_wgs84)
-                gdf_diss["Área (ha)"] = [a/10000 for a in area_m2]
-                # 3) Tabla ordenada
-                tabla = gdf_diss[["_cat","Área (ha)"]].rename(columns={"_cat":"Tipo de suelo"}).sort_values("Área (ha)", ascending=False)
-                st.dataframe(tabla, use_container_width=True, hide_index=True)
+        with col2:
+            st.subheader("SIU – usosuelo (ha)")
+            if out["tabla_siu"] is None or out["tabla_siu"].empty:
+                st.info("Sin datos de SIU (o sin intersección).")
+            else:
+                st.dataframe(out["tabla_siu"], use_container_width=True, hide_index=True)
+                st.caption(f"Total: **{out['tabla_siu']['Área (ha)'].sum():,.2f} ha**")
 
+        st.subheader("Intersección usosuelo × clasesuelo (ha)")
+        if out["tabla_long"] is None or out["tabla_long"].empty:
+            st.info("No hay intersección entre SIU y Clase de suelo dentro del municipio.")
+        else:
+            st.dataframe(out["tabla_long"], use_container_width=True, hide_index=True)
+            if out["matriz_pivot"] is not None:
+                st.caption("Matriz (ha): usosuelo × clasesuelo")
+                st.dataframe(out["matriz_pivot"].style.format("{:,.2f}"), use_container_width=True)
     else:
-        st.info("Selecciona un municipio para ver la tabla de tipos de suelo.")
-
-
-
-
+        st.info("Selecciona un municipio para calcular áreas e intersecciones.")
 
 
 
