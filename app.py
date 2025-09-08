@@ -1709,13 +1709,12 @@ def main():
                         # Indicador 1: solo la superficie
                         row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = round(st.session_state["sup_cultivos_12"], 2)
                 
-                        # Indicador 2: porcentaje sobre sup. municipal
-                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni)) / 10000  # ha
-                        if muni_area_ha > 0:
-                            pct12 = round((st.session_state["sup_cultivos_12"] / muni_area_ha) * 100, 2)
-                            row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = pct12
-                        else:
-                            row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
+                        # Indicador 2: porcentaje sobre sup. municipalmunicipio_area_ha
+
+                        
+                        muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
+                        pct12 = round((st.session_state["sup_cultivos_12"] / muni_area_ha) * 100, 2)
+                        row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = pct12
                     else:
                         row["D.17.a. Superficie infraestructura de transporte (ha)(cod: 12)"] = None
                         row["D.17.b. Superficie infraestructura de transporte (%)(cod: 12)"] = None
@@ -1758,13 +1757,9 @@ def main():
                         muni_area_ha = sum(calculate_ellipsoidal_area(gdf_muni.to_crs(4326))) / 10000
 
                         if muni_area_ha > 0:
-                            print("HOLASDADSA")
                             pct3 = round(st.session_state["sup_cultivos_03"], 2)
-                            print(pct3)
                             pct2 = round(st.session_state["sup_cultivos_02"], 2)
-                            print(pct2)
                             pct1 = round(st.session_state["sup_cultivos_01"], 2)
-                            print(pct1)
                             row["D.07. Suelo urbano discontinuo (%)"] = pct3*100/(pct3+pct1+pct2)
                         else:
                             row["D.07. Suelo urbano discontinuo (%)"] = None
@@ -1774,7 +1769,22 @@ def main():
                     row["D.07. Suelo urbano discontinuo (%)"] = None
 
 
-                
+                # D.08.d: Densidad de vivienda (viv/ha) = viviendas / (SUC+ADC)
+                try:
+                    sucadc_ha = st.session_state.get("SUCADCtotal_ha")
+                    viv_tot_2021 = None
+                    if censo_df is not None and not censo_df.empty and "viviendasT" in censo_df.columns:
+                        vv = pd.to_numeric(censo_df["viviendasT"].iloc[0], errors="coerce")
+                        viv_tot_2021 = None if pd.isna(vv) else float(vv)
+
+                    if sucadc_ha and sucadc_ha > 0 and viv_tot_2021:
+                        # Usamos el valor de viviendas 2021 para todos los años (última referencia disponible)
+                        row["D.08. Densidad de vivienda (viv/ha)"] = round(viv_tot_2021 / sucadc_ha, 2)
+                    else:
+                        row["D.08. Densidad de vivienda (viv/ha)"] = None
+                except Exception:
+                    row["D.08, Densidad de vivienda (viv/ha)"] = None
+
 
 
                 # --- D.26: % trabajadores por sector (media anual SEPE Contratos) ---
