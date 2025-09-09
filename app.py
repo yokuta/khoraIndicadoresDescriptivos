@@ -929,6 +929,10 @@ def main():
 
         return ts_paro, ts_cont
 
+
+
+
+
     def _sector_percentages_from_row(row) -> pd.Series:
         tot = float(row.get("cTotal", 0) or 0)
         if tot <= 0 or pd.isna(tot):
@@ -1152,6 +1156,68 @@ def main():
 
         return {"n_total": n_total, "n_25_44": n_25_44, "n_mujer": n_mujer}
 
+    def build_suc_adc_mask_from_clips(gdf_clase_clip: gpd.GeoDataFrame,
+                                    gdf_siu_clip: gpd.GeoDataFrame,
+                                    crs_metric: str = "EPSG:25830") -> gpd.GeoDataFrame | None:
+        """
+        Devuelve un GeoDataFrame con UNA o varias geometrías que representan (SUC ∪ ADC)
+        usando las capas YA RECORTADAS AL MUNICIPIO (gdf_clase_clip y gdf_siu_clip).
+        - SUC = filas de clase de suelo con 'SUELO URBANO'
+        - ADC = usosuelo en {'DESARROLLO CONSOLIDADO','SUELO EDIFICADO',
+                            'SUELO EN PROCESO DE EDIFICACION',
+                            'SUELO URBANIZADO O EN PROCESO DE URBANIZACION'}
+        """
+        if (gdf_clase_clip is None or gdf_clase_clip.empty) and (gdf_siu_clip is None or gdf_siu_clip.empty):
+            return None
+
+        def _norm(s):
+            if pd.isna(s): return ""
+            s = "".join(c for c in unicodedata.normalize("NFKD", str(s)) if unicodedata.category(c) != "Mn")
+            return re.sub(r"\s+", " ", s.upper().strip())
+
+        ADC_SET = {
+            "DESARROLLO CONSOLIDADO",
+            "SUELO EDIFICADO",
+            "SUELO EN PROCESO DE EDIFICACION",
+            "SUELO URBANIZADO O EN PROCESO DE URBANIZACION",
+        }
+        adc_norms = {_norm(x) for x in ADC_SET}
+
+        # Asegura CRS métrico
+        parts = []
+        if gdf_clase_clip is not None and not gdf_clase_clip.empty:
+            C = gdf_clase_clip.copy()
+            if C.crs is None: C.set_crs(crs_metric, inplace=True)
+            if C.crs.to_string() != crs_metric: C = C.to_crs(crs_metric)
+            if "clasesuelo" in C.columns:
+                C["_clase_norm"] = C["clasesuelo"].apply(_norm)
+                C_urb = C[C["_clase_norm"] == "SUELO URBANO"][["geometry"]].copy()
+                if not C_urb.empty:
+                    try: C_urb["geometry"] = C_urb.buffer(0)
+                    except: pass
+                    parts.append(C_urb)
+
+        if gdf_siu_clip is not None and not gdf_siu_clip.empty:
+            S = gdf_siu_clip.copy()
+            if S.crs is None: S.set_crs(crs_metric, inplace=True)
+            if S.crs.to_string() != crs_metric: S = S.to_crs(crs_metric)
+            if "usosuelo" in S.columns:
+                S["_uso_norm"] = S["usosuelo"].apply(_norm)
+                S_adc = S[S["_uso_norm"].isin(adc_norms)][["geometry"]].copy()
+                if not S_adc.empty:
+                    try: S_adc["geometry"] = S_adc.buffer(0)
+                    except: pass
+                    parts.append(S_adc)
+
+        if not parts:
+            return None
+
+        mask = pd.concat(parts, ignore_index=True)
+        # Disolver para obtener una o pocas geometrías compactas (unión):
+        mask = mask.dissolve().explode(index_parts=False)
+        if mask.geometry.name != "geometry":
+            mask = mask.set_geometry(mask.geometry.name).rename_geometry("geometry")
+        return mask
 
 
     # -------------------- MAIN APP --------------------
@@ -1290,7 +1356,8 @@ def main():
                                 gdf_to_show = gdf_user
                         else:
                             gdf_to_show = gdf_user
-                
+                        
+                        """
                         # Mapa rápido con Folium (reutiliza tu creador de mapas)
                         st.markdown("#### 🗺️ Vista rápida en mapa")
                         try:
@@ -1298,7 +1365,7 @@ def main():
                             st_folium(m_user, width=1200, height=500, key="map_user_layer")
                         except Exception as e:
                             st.warning(f"No se pudo renderizar el mapa: {e}")
-                
+                        """
                         # Exportadores (reutiliza tu export_geodata)
                         st.markdown("#### ⬇️ Exportar resultados")
                         colx, coly, colz = st.columns(3)
@@ -1424,12 +1491,118 @@ def main():
 
             # 4) Total
             SUCADCtotal_ha = SUC_ha + ADC_ha
-
+            
+            
+            sucadc_mask_gdf = build_suc_adc_mask_from_clips(gdf_clase_clip, gdf_siu_clip)
+            st.session_state["sucadc_mask_gdf"] = sucadc_mask_gdf   
             # Store/print
             st.session_state["SUC_ha"] = round(SUC_ha, 2)
             st.session_state["ADC_ha"] = round(ADC_ha, 2)
             st.session_state["SUCADCtotal_ha"] = round(SUCADCtotal_ha, 2)
             
+
+            # ====================== 🏗️ EDIFICIOS: recorte por Municipio y por SUC+ADC ======================
+            st.markdown("### 🏗️ Edificios: recorte por **Municipio** y por **SUC+ADC**")
+
+            edif_file = st.file_uploader(
+                "Sube el GML/SHP/GPKG/GeoJSON de **edificios** (huellas de edificios)",
+                type=["gml", "zip", "gpkg", "geojson"],
+                accept_multiple_files=False,
+                key="uploader_edificios"
+            )
+
+            if edif_file is not None and selected_muni and gdf_muni is not None and not gdf_muni.empty:
+                gdf_edif = None
+                try:
+                    gdf_edif = _read_any_vector(edif_file)
+                except Exception as e:
+                    st.error(f"❌ No pude leer la capa de edificios: {e}")
+
+                if gdf_edif is not None and not gdf_edif.empty:
+                    display_geodata_info(gdf_edif, edif_file.name)
+                    edif_muni = perform_spatial_clip(gdf_edif, gdf_muni)
+                    if edif_muni is None or edif_muni.empty:
+                        st.warning("⚠️ No hay intersección entre los edificios y el término municipal.")
+                    else:
+                        edif_muni = edif_muni.copy()
+                        n_muni = len(edif_muni)
+                        area_muni_ha = float(edif_muni.get("area_ha", pd.Series(dtype=float)).sum()) if "area_ha" in edif_muni.columns else None
+                        st.success(f"✅ Edificios dentro del municipio: **{n_muni:,}**")
+                        if area_muni_ha is not None:
+                            st.caption(f"Área total de huellas recortadas (Municipio): **{area_muni_ha:,.2f} ha**")
+
+                    # Recorte 2: Edificios ∩ (SUC ∪ ADC)
+                    sucadc_mask_gdf = st.session_state.get("sucadc_mask_gdf", None)
+                    edif_sucadc = None
+                    if sucadc_mask_gdf is None or sucadc_mask_gdf.empty:
+                        st.info("ℹ️ No hay máscara SUC+ADC disponible (revisa que existan capas de clase de suelo y SIU para el municipio).")
+                    else:
+                        # Reutiliza perform_spatial_clip (ajusta CRS y recalcula áreas)
+                        # Si ya hiciste el recorte municipal, recortamos ese resultado contra SUC+ADC (ambos dentro del municipio)
+                        base_to_clip = edif_muni if (edif_muni is not None and not edif_muni.empty) else gdf_edif
+                        edif_sucadc = perform_spatial_clip(base_to_clip, sucadc_mask_gdf)
+                        if edif_sucadc is None or edif_sucadc.empty:
+                            st.warning("⚠️ No hay edificios dentro de la máscara SUC+ADC.")
+                        else:
+                            edif_sucadc = edif_sucadc.copy()
+                            n_sucadc = len(edif_sucadc)
+                            area_sucadc_ha = float(edif_sucadc.get("area_ha", pd.Series(dtype=float)).sum()) if "area_ha" in edif_sucadc.columns else None
+                            st.success(f"✅ Edificios dentro de SUC+ADC: **{n_sucadc:,}**")
+                            if area_sucadc_ha is not None:
+                                st.caption(f"Área total de huellas recortadas (SUC+ADC): **{area_sucadc_ha:,.2f} ha**")
+                            # ====== CÁLCULO: Σ (área_huella_m2 × numberOfFloorsAboveGround) en SUC+ADC ======
+                            # 1) Localiza la columna de plantas (case-insensitive)
+                            floors_col = next((c for c in edif_sucadc.columns
+                                            if c.lower() == "numberoffloorsaboveground"), None)
+
+                            if floors_col is None:
+                                st.warning("⚠️ No se encontró el campo 'numberOfFloorsAboveGround' en la capa de edificios.")
+                            else:
+                                # 2) Asegura área en m² para cada geometría del recorte SUC+ADC
+                                #    (perform_spatial_clip ya crea 'area_m2'; si faltase, la calculamos elipsoidalmente)
+                                if "area_m2" not in edif_sucadc.columns:
+                                    try:
+                                        edif_sucadc["area_m2"] = calculate_ellipsoidal_area(edif_sucadc.to_crs(4326))
+                                    except Exception:
+                                        # fallback métrico si algo falla con elipsoidal
+                                        crs_metric = "EPSG:25830"
+                                        g_tmp = edif_sucadc if (edif_sucadc.crs and edif_sucadc.crs.to_string()==crs_metric) \
+                                                else edif_sucadc.to_crs(crs_metric)
+                                        edif_sucadc["area_m2"] = g_tmp.geometry.area
+
+                                # 3) Normaliza plantas a numérico (negativos → 0)
+                                edif_sucadc["_floors_num"] = pd.to_numeric(edif_sucadc[floors_col], errors="coerce").fillna(0)
+                                edif_sucadc["_floors_num"] = edif_sucadc["_floors_num"].clip(lower=0)
+
+                                # 4) Superficie construida aproximada (GFA proxy) por edificio y total
+                                edif_sucadc["m2_construidos_aprox"] = edif_sucadc["area_m2"] * edif_sucadc["_floors_num"]
+                                total_m2_construidos = float(edif_sucadc["m2_construidos_aprox"].sum())
+
+                                # 5) Mostrar resultado
+                                st.subheader("🏗️ Superficie construida aproximada dentro de SUC+ADC")
+                                colA, colB = st.columns(2)
+                                with colA:
+                                    st.metric("Σ (área × plantas)", f"{total_m2_construidos:,.0f} m²")
+                                with colB:
+                                    st.caption(f"Edificios contados: {len(edif_sucadc):,} • Campo de plantas usado: **{floors_col}**")
+
+                                # 6) (Opcional) Top 10 edificios por m² construidos aprox.
+                                with st.expander("Ver top 10 edificios por m² construidos aprox."):
+                                    cols_show = [floors_col, "area_m2", "m2_construidos_aprox"]
+                                    cols_show = [c for c in cols_show if c in edif_sucadc.columns]
+                                    st.dataframe(
+                                        edif_sucadc[cols_show]
+                                            .sort_values("m2_construidos_aprox", ascending=False)
+                                            .head(10),
+                                        use_container_width=True
+                                    )
+
+
+
+
+    
+
+                
             """
             st.markdown("### 🧮 SUC / ADC / Total (ha)")
             c1, c2, c3 = st.columns(3)
@@ -1438,8 +1611,7 @@ def main():
             c3.metric("SUC + ADC (ha)", f"{st.session_state['SUCADCtotal_ha']:,}")
             """
                 
-                
-
+        
             if pop_df.empty:
                 st.error("❌ No se encontraron datos para el municipio seleccionado.")
                 st.stop()
