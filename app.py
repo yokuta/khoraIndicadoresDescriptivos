@@ -15,7 +15,7 @@ import unicodedata, re, numpy as np
 import streamlit as st
 import traceback, sys, os
 st.set_page_config(page_title="Indicadores Khôra", layout="wide")
-
+import contextlib 
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -1490,7 +1490,7 @@ def main():
                     ADC_ha = sum(a/10000 for a in area_m2)
 
             # 4) Total
-            SUCADCtotal_ha = SUC_ha + ADC_ha
+            SUCADCtotal_ha = SUC_ha*1000 + ADC_ha*1000
             
             
             sucadc_mask_gdf = build_suc_adc_mask_from_clips(gdf_clase_clip, gdf_siu_clip)
@@ -1603,13 +1603,12 @@ def main():
     
 
                 
-            """
             st.markdown("### 🧮 SUC / ADC / Total (ha)")
             c1, c2, c3 = st.columns(3)
             c1.metric("SUC (ha) – SUELO URBANO", f"{st.session_state['SUC_ha']:,}")
             c2.metric("ADC (ha) – usos seleccionados", f"{st.session_state['ADC_ha']:,}")
             c3.metric("SUC + ADC (ha)", f"{st.session_state['SUCADCtotal_ha']:,}")
-            """
+           
                 
         
             if pop_df.empty:
@@ -2364,6 +2363,105 @@ def main():
     else:
         st.info("Selecciona un municipio para calcular áreas e intersecciones.")
 
+    # === ETL Catastro (local) – Integración con Streamlit ===
+    
+    import comando  # <-- tu script ETL
+    def _solo_nombre_muni(s: str) -> str:
+        """
+        Quita cualquier número/código inicial y separadores comunes.
+        '08019 Barcelona' -> 'Barcelona'
+        '08019 - Barcelona' -> 'Barcelona'
+        """
+        if s is None:
+            return ""
+        s = str(s).strip()
+        # quita números iniciales + separadores (- – — . · : y espacios)
+        s = re.sub(r"^\s*\d+\s*[-–—:.·]*\s*", "", s)
+        return s.strip()
+
+    st.markdown("## 🧱 ETL Catastro (archivos locales)")
+
+    # 1) Mostrar el municipio ya elegido en tu UI (usas selected_muni de tu app)
+    selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
+
+    if not selected_muni_clean:
+        st.info("Selecciona un municipio arriba para poder ejecutar el ETL.")
+    else:
+        st.write(f"Municipio seleccionado: **{selected_muni_clean}**")
+
+        # 2) Entradas de rutas (Streamlit no tiene 'selector de carpeta', así que usamos text_input)
+        col_a, col_b = st.columns(2)
+        with col_a:
+            cat_dir = st.text_input(
+                "Carpeta con ficheros CAT/CAT.gz",
+                value=r"C:\ruta\a\mi\carpeta\CAT",
+                placeholder=r"C:\Users\...\Desktop\CAT"
+            )
+        with col_b:
+            out_dir = st.text_input(
+                "Carpeta de salida",
+                value=r"C:\ruta\a\mi\carpeta\ETL_Salida",
+                placeholder=r"C:\Users\...\Desktop\ETL_Salida"
+            )
+
+        # 3) Botón para ejecutar
+        run = st.button("▶️ Ejecutar ETL con estas rutas", disabled=not selected_muni_clean)
+
+        # 4) Ejecutar y capturar logs de print() de tu script
+        if run:
+            # Validaciones mínimas
+            if not os.path.isdir(cat_dir):
+                st.error("❌ La carpeta de entrada CAT no existe.")
+            elif not out_dir:
+                st.error("❌ Indica una carpeta de salida.")
+            else:
+                os.makedirs(out_dir, exist_ok=True)
+
+                # Captura de stdout/stderr para mostrar en la UI
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    with st.status("Ejecutando ETL…", expanded=True) as status:
+                        try:
+                            st.write("📦 Carpeta CAT:", cat_dir)
+                            st.write("📤 Carpeta salida:", out_dir)
+                            st.write("🏙️ Municipio:", selected_muni_clean)
+
+                            # usa el municipio LIMPIO
+                            comando.run_etl(cat_dir, selected_muni_clean, out_dir)
+
+                            status.update(label="✅ ETL finalizado", state="complete")
+                        except Exception as e:
+                            status.update(label="❌ ETL con errores", state="error")
+                            st.exception(e)
+
+                # Mostrar el log completo
+                st.subheader("📝 Log de ejecución")
+                st.text(buf.getvalue())
+
+                # 5) Si todo fue bien, ofrecer descargas de los CSV generados
+                esperados = [
+                    "reg11_finca.csv",
+                    "reg13_uc.csv",
+                    "reg14_construccion.csv",
+                    "reg15_inmueble.csv",
+                    "reg16_reparto.csv",
+                    "reg17_cultivo.csv",
+                    "resumen_parcela.csv",
+                ]
+                generados = [f for f in esperados if os.path.isfile(os.path.join(out_dir, f))]
+                if generados:
+                    st.subheader("⬇️ Archivos generados")
+                    for fname in generados:
+                        fpath = os.path.join(out_dir, fname)
+                        with open(fpath, "rb") as fh:
+                            st.download_button(
+                                f"Descargar {fname}",
+                                data=fh.read(),
+                                file_name=fname,
+                                mime="text/csv",
+                            )
+                else:
+                    st.info("No se encontraron CSV esperados en la carpeta de salida.")
 
 
     st.markdown("---")
