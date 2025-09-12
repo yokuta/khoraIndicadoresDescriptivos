@@ -2559,10 +2559,14 @@ def main():
 
     col1, col2, col3 = st.columns([2,1,1])
     with col1:
+
         files = st.file_uploader(
             "Sube CAT/CAT.gz (o un ZIP). Puedes subir en varias tandas.",
-            type=["cat", "gz", "zip"], accept_multiple_files=True, key="cat_up"
+            type=["cat", "gz", "zip"],
+            accept_multiple_files=True,
+            key=uploader_key,   # <- ¡clave dinámica!
         )
+
     with col2:
         max_files_per_run = st.number_input(
             "Máx. ficheros por ejecución", min_value=1, max_value=50, value=20, step=1
@@ -2577,10 +2581,12 @@ def main():
             f.seek(0)
             with open(dst, "wb") as fh:
                 shutil.copyfileobj(f, fh, length=1024*1024)
-        # Limpia el uploader para liberar RAM
-        st.session_state["cat_up"] = None
+
+        # En vez de: st.session_state["cat_up"] = None  ❌
+        st.session_state["cat_reset"] += 1  # fuerza que el próximo rerun tenga un uploader nuevo (vacío)
         st.success(f"Subidos {len(os.listdir(STAGE_DIR))} fichero(s) a {STAGE_DIR}.")
         st.rerun()
+
 
     st.caption(f"En staging: **{len(os.listdir(STAGE_DIR))}** fichero(s) en {STAGE_DIR}")
 
