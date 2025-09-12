@@ -16,8 +16,8 @@ import streamlit as st
 import traceback, sys, os
 st.set_page_config(page_title="Indicadores Khôra", layout="wide")
 import contextlib 
+import shutil, glob
 import comando  # tu ETL
-import shutil, gzip, glob
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2365,38 +2365,19 @@ def main():
     else:
         st.info("Selecciona un municipio para calcular áreas e intersecciones.")
 
-    # === ETL Catastro (local) – Integración con Streamlit ===
-    
+    # === ETL Catastro (subidas grandes, por lotes) ===
 
 
-
-    # ---------- Utilidades ----------
+    # ---- helpers ----
     def _solo_nombre_muni(s: str) -> str:
-        if s is None: return ""
+        if s is None:
+            return ""
         s = str(s).strip()
-        return re.sub(r"^\s*\d+\s*[-–—:.·]*\s*", "", s).strip()
-
-    def append_csv(src_path: str, dst_path: str):
-        """Añade src a dst evitando cabeceras duplicadas, sin cargar todo en RAM."""
-        mode = "ab" if os.path.exists(dst_path) else "wb"
-        with open(src_path, "rb") as src, open(dst_path, mode) as dst:
-            header = src.readline()
-            if os.path.exists(dst_path):
-                # saltar cabecera si dst ya tiene
-                first_line = header  # descartada
-            else:
-                dst.write(header)
-            shutil.copyfileobj(src, dst)
-
-    def merge_outputs(batch_out: str, final_out: str, esperados: list[str]):
-        os.makedirs(final_out, exist_ok=True)
-        for fname in esperados:
-            s = os.path.join(batch_out, fname)
-            if os.path.isfile(s):
-                d = os.path.join(final_out, fname)
-                append_csv(s, d)
+        s = re.sub(r"^\s*\d+\s*[-–—:.·]*\s*", "", s)
+        return s.strip()
 
     def batched(iterable, n: int):
+        """Yield listas de tamaño n."""
         batch = []
         for x in iterable:
             batch.append(x)
@@ -2406,124 +2387,145 @@ def main():
         if batch:
             yield batch
 
-    # ---------- UI ----------
-    st.markdown("## 🧱 ETL Catastro (archivos grandes, por lotes)")
-    selected_muni_clean = _solo_nombre_muni(selected_muni) if 'selected_muni' in globals() else None
+    def append_csv(src_path: str, dst_path: str):
+        """Añade src a dst evitando duplicar cabeceras, sin cargar todo en RAM."""
+        if not os.path.exists(dst_path):
+            # si no existe, copiamos entero (incluida cabecera)
+            with open(src_path, "rb") as src, open(dst_path, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024*1024)
+            return
+        # si existe, saltamos la primera línea (cabecera) de src
+        with open(src_path, "rb") as src, open(dst_path, "ab") as dst:
+            header = src.readline()  # descartada
+            shutil.copyfileobj(src, dst, length=1024*1024)
+
+    def merge_outputs(batch_out_dir: str, final_out_dir: str, esperados: list[str]):
+        os.makedirs(final_out_dir, exist_ok=True)
+        for fname in esperados:
+            src = os.path.join(batch_out_dir, fname)
+            if os.path.isfile(src):
+                dst = os.path.join(final_out_dir, fname)
+                append_csv(src, dst)
+
+    # ---- UI ----
+    st.markdown("## 🧱 ETL Catastro (sube tus ficheros CAT)")
+
+    selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
     if not selected_muni_clean:
         st.info("Selecciona un municipio arriba para poder ejecutar el ETL.")
         st.stop()
 
     col1, col2 = st.columns(2)
     with col1:
-        files = st.file_uploader("Sube 1 o varios ZIP/CAT/CAT.GZ", type=["zip","cat","gz"], accept_multiple_files=True)
+        files = st.file_uploader(
+            "Sube ficheros CAT/CAT.gz (o un ZIP)",
+            type=["cat", "gz", "zip"],
+            accept_multiple_files=True
+        )
     with col2:
-        remote_zip_url = st.text_input("O pega URL directa a ZIP (opcional)")
-    lote_tam = st.number_input("Tamaño de lote (nº de ficheros por ejecución ETL)", min_value=1, max_value=50, value=8)
-    final_out = st.text_input("Carpeta de salida final (servidor)", value="/tmp/etl_final")
+        out_dir = st.text_input("Carpeta de salida (servidor)", value="/tmp/etl_salida")
 
-    esperados = [
-        "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
-        "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
-        "resumen_parcela.csv",
-    ]
+    # nuevo: tamaño de lote
+    lote_tam = st.number_input("Tamaño de lote (# ficheros por ejecución)", 1, 50, 10, step=1)
 
-    run = st.button("▶️ Ejecutar ETL por lotes", disabled=not(files or remote_zip_url))
-    if not run:
-        st.stop()
+    run = st.button("▶️ Ejecutar ETL", disabled=(not files))
 
-    # ---------- Preparar entradas en /tmp sin cargar todo a memoria ----------
-    work_dir = tempfile.mkdtemp(prefix="cat_work_")
-    in_dir = os.path.join(work_dir, "in")
-    os.makedirs(in_dir, exist_ok=True)
-    st.write("📦 Carpeta de trabajo:", work_dir)
+    if run:
+        if not files:
+            st.error("❌ Sube al menos un fichero CAT/CAT.gz o un ZIP.")
+            st.stop()
 
-    # Copiar uploads a disco en chunks
-    for f in files or []:
-        dst = os.path.join(in_dir, f.name)
-        f.seek(0)
-        with open(dst, "wb") as fh:
-            shutil.copyfileobj(f, fh, length=1024*1024)  # 1MB por chunk
-        if f.name.lower().endswith(".zip"):
-            with zipfile.ZipFile(dst) as zf:
-                zf.extractall(in_dir)
-            os.remove(dst)
+        # 1) Preparar carpetas temporales y salida final
+        work_dir = tempfile.mkdtemp(prefix="cat_work_")
+        tmp_in = os.path.join(work_dir, "in")
+        os.makedirs(tmp_in, exist_ok=True)
+        os.makedirs(out_dir, exist_ok=True)
 
-    # Descargar ZIP remoto si hay URL (en chunks)
-    if remote_zip_url:
-        import requests
-        zip_path = os.path.join(in_dir, "remote.zip")
-        with requests.get(remote_zip_url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(zip_path, "wb") as fh:
-                for chunk in r.iter_content(chunk_size=1024*1024):
-                    if chunk:
-                        fh.write(chunk)
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(in_dir)
-        os.remove(zip_path)
-
-    # Lista de ficheros CAT/CAT.GZ preparados
-    all_files = sorted(glob.glob(os.path.join(in_dir, "*.cat"))) + \
-                sorted(glob.glob(os.path.join(in_dir, "*.cat.gz")))
-    total = len(all_files)
-    if total == 0:
-        st.error("No se encontraron ficheros .cat / .cat.gz tras preparar la entrada.")
-        st.stop()
-
-    st.success(f"Encontrados {total} ficheros para procesar.")
-
-    # ---------- Procesamiento por lotes ----------
-    os.makedirs(final_out, exist_ok=True)
-    log = io.StringIO()
-    processed = 0
-
-    with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-        with st.status("Procesando lotes…", expanded=True) as status:
-            for i, batch in enumerate(batched(all_files, int(lote_tam)), start=1):
-                status.update(label=f"Ejecutando lote {i} ({processed}/{total})…")
-                # Crear carpeta temporal del lote y mover ahí los ficheros del lote
-                batch_dir = os.path.join(work_dir, f"batch_{i}")
-                os.makedirs(batch_dir, exist_ok=True)
-                for p in batch:
-                    shutil.move(p, os.path.join(batch_dir, os.path.basename(p)))
-
-                # Carpeta de salida temporal del lote
-                batch_out = os.path.join(work_dir, f"out_{i}")
-                os.makedirs(batch_out, exist_ok=True)
-
+        # 2) Guardar uploads en disco (streaming) y extraer ZIPs
+        for f in files:
+            name = f.name
+            dst = os.path.join(tmp_in, name)
+            f.seek(0)
+            with open(dst, "wb") as fh:
+                shutil.copyfileobj(f, fh, length=1024*1024)  # 1MB por chunk
+            if name.lower().endswith(".zip"):
+                with zipfile.ZipFile(dst, "r") as zf:
+                    zf.extractall(tmp_in)
                 try:
-                    # Ejecutar tu ETL sobre SOLO el lote
-                    comando.run_etl(batch_dir, selected_muni_clean, batch_out)
-                    # Fusionar salidas del lote en los CSV finales
-                    merge_outputs(batch_out, final_out, esperados)
+                    os.remove(dst)
+                except OSError:
+                    pass
+
+        # 3) Recopilar archivos .cat y .cat.gz
+        cat_files = sorted(glob.glob(os.path.join(tmp_in, "*.cat"))) + \
+                    sorted(glob.glob(os.path.join(tmp_in, "*.cat.gz")))
+        total = len(cat_files)
+        if total == 0:
+            st.error("No se encontraron ficheros .cat / .cat.gz tras preparar la entrada.")
+            st.stop()
+
+        # 4) Ejecutar ETL por lotes
+        buf = io.StringIO()
+        procesados = 0
+        esperados = [
+            "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
+            "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
+            "resumen_parcela.csv",
+        ]
+
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            with st.status("Ejecutando ETL por lotes…", expanded=True) as status:
+                try:
+                    for i, batch in enumerate(batched(cat_files, int(lote_tam)), start=1):
+                        status.update(label=f"Procesando lote {i} ({procesados}/{total})…")
+                        # crear carpeta de lote y mover SOLO los ficheros del lote
+                        batch_dir = os.path.join(work_dir, f"batch_{i}")
+                        os.makedirs(batch_dir, exist_ok=True)
+                        for p in batch:
+                            shutil.move(p, os.path.join(batch_dir, os.path.basename(p)))
+
+                        # salida temporal del lote
+                        batch_out = os.path.join(work_dir, f"out_{i}")
+                        os.makedirs(batch_out, exist_ok=True)
+
+                        # ejecutar tu ETL sobre el lote
+                        print(f"[Lote {i}] ETL sobre {len(batch)} ficheros…")
+                        comando.run_etl(batch_dir, selected_muni_clean, batch_out)
+
+                        # fusionar salidas del lote en la salida final
+                        merge_outputs(batch_out, out_dir, esperados)
+
+                        # limpiar lote para liberar espacio
+                        shutil.rmtree(batch_dir, ignore_errors=True)
+                        shutil.rmtree(batch_out, ignore_errors=True)
+
+                        procesados += len(batch)
+                        st.write(f"✅ Lote {i} completado. Progreso: {procesados}/{total}")
+
+                    status.update(label="✅ ETL finalizado (todos los lotes)", state="complete")
                 except Exception as e:
-                    status.update(label=f"❌ Error en lote {i}", state="error")
+                    status.update(label="❌ ETL con errores", state="error")
                     st.exception(e)
-                    st.stop()
-                finally:
-                    # Limpiar lote para liberar disco
-                    shutil.rmtree(batch_dir, ignore_errors=True)
-                    shutil.rmtree(batch_out, ignore_errors=True)
 
-                processed += len(batch)
-                st.write(f"✅ Lote {i} completado. Progreso: {processed}/{total}")
+        # 5) Log completo
+        st.subheader("📝 Log de ejecución")
+        st.text(buf.getvalue())
 
-            status.update(label="✅ Todos los lotes completados", state="complete")
-
-    st.subheader("📝 Log de ejecución")
-    st.text(log.getvalue())
-
-    # ---------- Descargas finales ----------
-    generados = [f for f in esperados if os.path.isfile(os.path.join(final_out, f))]
-    if generados:
-        st.subheader("⬇️ Archivos finales")
-        for fname in generados:
-            fpath = os.path.join(final_out, fname)
-            with open(fpath, "rb") as fh:
-                st.download_button(f"Descargar {fname}", data=fh.read(), file_name=fname, mime="text/csv")
-    else:
-        st.info("No se encontraron CSV esperados en la carpeta final.")
-
+        # 6) Ofrecer descargas finales desde out_dir
+        generados = [f for f in esperados if os.path.isfile(os.path.join(out_dir, f))]
+        if generados:
+            st.subheader("⬇️ Archivos generados")
+            for fname in generados:
+                fpath = os.path.join(out_dir, fname)
+                with open(fpath, "rb") as fh:
+                    st.download_button(
+                        f"Descargar {fname}",
+                        data=fh.read(),
+                        file_name=fname,
+                        mime="text/csv",
+                    )
+        else:
+            st.info("No se encontraron CSV esperados en la carpeta de salida.")
 
 
         st.markdown("---")
