@@ -20,6 +20,7 @@ import shutil, glob
 import comando  # tu ETL
 import gc
 import time
+import uuid, json
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2540,213 +2541,210 @@ def main():
         return counts
 
 
-    # ---- UI ----
-    st.markdown("## 🧱 ETL de asier (sube tus ficheros CAT)")
+    # ---- UI (staging + bloques) ----
+    
+    SID = st.session_state.setdefault("etl_sid", str(uuid.uuid4()))
+    STAGE_DIR = os.path.join("/tmp/etl_stage", SID)
+    WORK_DIR  = os.path.join("/tmp/etl_work",  SID)
+    MANIFEST  = os.path.join(WORK_DIR, "manifest.json")
+    os.makedirs(STAGE_DIR, exist_ok=True)
+    os.makedirs(WORK_DIR,  exist_ok=True)
+
+    st.markdown("## 🧱 ETL Catastro (staging + bloques)")
 
     selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
     if not selected_muni_clean:
         st.info("Selecciona un municipio arriba para poder ejecutar el ETL.")
         st.stop()
 
-    col1, col2 = st.columns([2,1])
+    col1, col2, col3 = st.columns([2,1,1])
     with col1:
         files = st.file_uploader(
-            "Sube ficheros CAT/CAT.gz (o un ZIP)",
-            type=["cat", "gz", "zip"],
-            accept_multiple_files=True
+            "Sube CAT/CAT.gz (o un ZIP). Puedes subir en varias tandas.",
+            type=["cat", "gz", "zip"], accept_multiple_files=True, key="cat_up"
         )
     with col2:
-        lote_tam = st.number_input("Tamaño de lote (# ficheros por ejecución)",
-                                min_value=1, max_value=20, value=1, step=1)
-
-    run = st.button("▶️ Ejecutar ETL", disabled=(not files))
-    if not run:
-        st.stop()
-
-    if not files:
-        st.error("❌ Sube al menos un fichero CAT/CAT.gz o un ZIP.")
-        st.stop()
-
-    # 1) Preparar carpeta de trabajo
-    work_dir = tempfile.mkdtemp(prefix="cat_work_")
-    tmp_in   = os.path.join(work_dir, "in")
-    os.makedirs(tmp_in, exist_ok=True)
-
-    # 2) Guardar uploads sin cargar todo a memoria
-    for f in files:
-        dst = os.path.join(tmp_in, f.name)
-        f.seek(0)
-        with open(dst, "wb") as fh:
-            shutil.copyfileobj(f, fh, length=1024*1024)
-
-    # 3) Construir una lista de ENTRADAS a procesar sin extraer todo de golpe
-    #    - .cat / .cat.gz: procesar directo
-    #    - .zip: procesar cada miembro del zip uno por uno
-    inputs = []  # cada item: dict con tipo y cómo obtener el archivo físico
-
-    for name in os.listdir(tmp_in):
-        p = os.path.join(tmp_in, name)
-        low = name.lower()
-        if low.endswith(".cat") or low.endswith(".cat.gz"):
-            inputs.append({"kind": "file", "path": p, "name": name})
-        elif low.endswith(".zip"):
-            try:
-                zf = zipfile.ZipFile(p, "r")
-                for zi in zf.infolist():
-                    lni = zi.filename.lower()
-                    if lni.endswith(".cat") or lni.endswith(".cat.gz"):
-                        inputs.append({"kind": "zip-entry", "zip_path": p, "member": zi.filename})
-            except zipfile.BadZipFile:
-                st.warning(f"ZIP corrupto ignorado: {name}")
-
-    total = len(inputs)
-    if total == 0:
-        st.error("No se encontraron .cat / .cat.gz en los archivos subidos (ni dentro de ZIPs).")
-        st.stop()
-
-    # 4) Procesar por lotes “reales”, SOLO streaming (sin run_etl)
-    buf = io.StringIO()
-    esperados = [
-        "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
-        "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
-    ]
-
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        with st.status("Procesando…", expanded=True) as status:
-            try:
-                processed = 0
-                i = 0
-                while i < total:
-                    batch = inputs[i:i+int(lote_tam)]
-                    i += int(lote_tam)
-
-                    if not have_disk(256):
-                        raise RuntimeError("⛔️ Espacio insuficiente en /tmp (<256 MB libres).")
-                    if mem_free_mb() < 256:
-                        raise MemoryError("⛔️ Memoria disponible insuficiente (<256 MB).")
-
-                    status.update(label=f"Lote {processed+1}… ({processed}/{total})")
-
-                    # Materializa SOLO el lote (puede haber subcarpetas dentro del ZIP)
-                    batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
-                    for item in batch:
-                        if item["kind"] == "file":
-                            shutil.move(item["path"], os.path.join(batch_dir, os.path.basename(item["name"])))
-                        else:
-                            with zipfile.ZipFile(item["zip_path"], "r") as zf:
-                                zf.extract(item["member"], path=batch_dir)
-
-                    # Recoge .cat/.cat.gz de forma RECURSIVA
-                    to_process = []
-                    for root, _, names in os.walk(batch_dir):
-                        for n in names:
-                            ln = n.lower()
-                            if ln.endswith(".cat") or ln.endswith(".cat.gz"):
-                                to_process.append(os.path.join(root, n))
-
-                    # Procesa en streaming y acumula contadores
-                    total_counts = {"11":0,"13":0,"14":0,"15":0,"16":0,"17":0}
-                    for one in to_process:
-                        c = stream_split_single_file(one, OUT_DIR)
-                        for k,v in c.items():
-                            total_counts[k] += v
-
-                    # Limpieza y progreso
-                    shutil.rmtree(batch_dir, ignore_errors=True)
-                    processed += len(batch)
-                    st.write(f"✅ Lote completado. Progreso: {processed}/{total} — "
-                            f"Regs: 11={total_counts['11']},13={total_counts['13']},14={total_counts['14']},"
-                            f"15={total_counts['15']},16={total_counts['16']},17={total_counts['17']}")
-                    gc.collect()
-
-                status.update(label="✅ ETL finalizado", state="complete")
-
-            except MemoryError as e:
-                status.update(label="❌ Sin memoria", state="error"); st.error(str(e))
-            except Exception as e:
-                status.update(label="❌ ETL con errores", state="error"); st.exception(e)
-
-
-    # 5) Log y descarga única en ZIP (siempre que haya algo descargable)
-    st.subheader("📝 Log de ejecución")
-    st.text(buf.getvalue())
-
-    # Listado real de OUT_DIR para depurar
-    try:
-        listing = sorted(os.listdir(OUT_DIR))
-        st.caption(f"OUT_DIR = {OUT_DIR}")
-        st.code("\n".join(listing) or "(vacío)", language="text")
-    except Exception as e:
-        st.warning(f"No pude listar OUT_DIR: {e}")
-
-    
-
-    def slugify(s: str) -> str:
-        s = (s or "").strip()
-        s = re.sub(r"\s+", "_", s)
-        s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
-        return s or "salida"
-
-    def human(n):
-        for unit in ["B","KB","MB","GB","TB"]:
-            if n < 1024: return f"{n:.1f} {unit}"
-            n /= 1024
-
-    def build_zip_from(paths: list[str], out_dir: str, muni: str) -> str:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        zip_name = f"cat_{slugify(muni)}_{ts}.zip"
-        zip_path = os.path.join(out_dir, zip_name)
-        # Intento con LZMA (mejor compresión). Si falla, DEFLATED nivel 9.
-        try:
-            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_LZMA, allowZip64=True) as zf:
-                for p in paths:
-                    zf.write(p, arcname=os.path.basename(p))
-            return zip_path
-        except Exception:
-            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED,
-                                compresslevel=9, allowZip64=True) as zf:
-                for p in paths:
-                    zf.write(p, arcname=os.path.basename(p))
-            return zip_path
-
-    # 1) CSV que existan (si quieres excluir vacíos, usa 'if os.path.getsize(p) > 0')
-    csv_paths = sorted(glob.glob(os.path.join(OUT_DIR, "*.csv")))
-
-    # 2) Zips ya existentes en OUT_DIR (por si el paso anterior ya creó uno)
-    zip_paths = sorted(glob.glob(os.path.join(OUT_DIR, "cat_*.zip")), key=os.path.getmtime, reverse=True)
-
-    zip_path_to_offer = None
-    if csv_paths:
-        # Construye ZIP ahora mismo con lo que haya
-        zip_path_to_offer = build_zip_from(csv_paths, OUT_DIR, selected_muni_clean)
-    elif zip_paths:
-        # No hay CSV (o están a 0B) pero ya existe al menos un ZIP anterior
-        zip_path_to_offer = zip_paths[0]
-
-    if zip_path_to_offer and os.path.isfile(zip_path_to_offer):
-        st.subheader("⬇️ Resultados")
-        st.write(f"Descarga todo en un único ZIP:")
-        st.write(f"- **Archivo:** `{os.path.basename(zip_path_to_offer)}` — {human(os.path.getsize(zip_path_to_offer))}")
-
-        # Importante: pasar el *file-like* sin leer en memoria
-        fh = open(zip_path_to_offer, "rb")
-        st.download_button(
-            "Descargar todo (ZIP)",
-            data=fh,
-            file_name=os.path.basename(zip_path_to_offer),
-            mime="application/zip",
-            key="dl_zip_resultados"
+        max_files_per_run = st.number_input(
+            "Máx. ficheros por ejecución", min_value=1, max_value=50, value=20, step=1
         )
-        fh.close()
+    with col3:
+        lote_tam = st.number_input("Tamaño lote interno", min_value=1, max_value=20, value=5, step=1)
 
-        with st.expander("Ver tamaños de CSV incluidos"):
-            if csv_paths:
-                for p in csv_paths:
-                    st.write(f"- **{os.path.basename(p)}** — {human(os.path.getsize(p))}")
+    # 1) Añadir a STAGING
+    if files and st.button("➕ Añadir a staging (vuelca a disco y limpia memoria)"):
+        for f in files:
+            dst = os.path.join(STAGE_DIR, f.name)
+            f.seek(0)
+            with open(dst, "wb") as fh:
+                shutil.copyfileobj(f, fh, length=1024*1024)
+        # Limpia el uploader para liberar RAM
+        st.session_state["cat_up"] = None
+        st.success(f"Subidos {len(os.listdir(STAGE_DIR))} fichero(s) a {STAGE_DIR}.")
+        st.rerun()
+
+    st.caption(f"En staging: **{len(os.listdir(STAGE_DIR))}** fichero(s) en {STAGE_DIR}")
+
+    # Helpers para construir inputs desde STAGING
+    def build_inputs_from_dir(root_dir: str) -> list[dict]:
+        inputs = []
+        for name in os.listdir(root_dir):
+            p = os.path.join(root_dir, name)
+            low = name.lower()
+            if os.path.isdir(p):
+                # (por si alguien subió una carpeta dentro del ZIP)
+                for r, _, nn in os.walk(p):
+                    for n in nn:
+                        ln = n.lower()
+                        if ln.endswith(".cat") or ln.endswith(".cat.gz"):
+                            inputs.append({"kind":"file","path":os.path.join(r,n),"name":n})
+            elif low.endswith(".cat") or low.endswith(".cat.gz"):
+                inputs.append({"kind":"file","path":p,"name":name})
+            elif low.endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(p, "r") as zf:
+                        for zi in zf.infolist():
+                            lni = zi.filename.lower()
+                            if lni.endswith(".cat") or lni.endswith(".cat.gz"):
+                                inputs.append({"kind":"zip-entry","zip_path":p,"member":zi.filename})
+                except zipfile.BadZipFile:
+                    st.warning(f"ZIP corrupto ignorado: {name}")
+        return inputs
+
+    def save_manifest(pending: list[dict]):
+        with open(MANIFEST, "w", encoding="utf-8") as fh:
+            json.dump(pending, fh)
+
+    def load_manifest() -> list[dict] | None:
+        if os.path.isfile(MANIFEST):
+            try:
+                with open(MANIFEST, "r", encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:
+                return None
+        return None
+
+    # 2) Botones de ejecución
+    colA, colB = st.columns(2)
+    start_clicked = colA.button("▶️ Procesar staging")
+    continue_clicked = colB.button("⏭️ Procesar siguiente bloque")
+
+    if start_clicked or continue_clicked:
+        # Carga o crea manifest
+        manifest = load_manifest()
+        if manifest is None or start_clicked:
+            manifest = build_inputs_from_dir(STAGE_DIR)
+            save_manifest(manifest)
+
+        total_pending = len(manifest)
+        if total_pending == 0:
+            st.info("No hay nada pendiente en el manifest.")
+        else:
+            # Protección de recursos
+            if not have_disk(256):
+                st.error("⛔️ Espacio insuficiente en /tmp (<256 MB libres).")
+                st.stop()
+            if mem_free_mb() < 256:
+                st.error("⛔️ Memoria disponible insuficiente (<256 MB).")
+                st.stop()
+
+            # Toma solo el bloque de esta ejecución
+            this_block = manifest[:int(max_files_per_run)]
+            remaining = manifest[int(max_files_per_run):]
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                with st.status(f"Procesando bloque de {len(this_block)} ficheros…", expanded=True) as status:
+                    try:
+                        processed = 0
+                        # divide en lotes internos para evitar muchas extracciones simultáneas
+                        for i in range(0, len(this_block), int(lote_tam)):
+                            batch = this_block[i:i+int(lote_tam)]
+                            status.update(label=f"Lote {i//int(lote_tam)+1} ({processed}/{len(this_block)})…")
+
+                            batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
+                            # materializa el lote
+                            for item in batch:
+                                if item["kind"] == "file":
+                                    src = item["path"]
+                                    dst = os.path.join(batch_dir, os.path.basename(item["name"]))
+                                    if os.path.abspath(src) != os.path.abspath(dst):
+                                        shutil.copy2(src, dst)
+                                else:
+                                    with zipfile.ZipFile(item["zip_path"], "r") as zf:
+                                        zf.extract(item["member"], path=batch_dir)
+                            # recoge .cat/.gz recursivo
+                            to_process = []
+                            for root, _, names in os.walk(batch_dir):
+                                for n in names:
+                                    ln = n.lower()
+                                    if ln.endswith(".cat") or ln.endswith(".cat.gz"):
+                                        to_process.append(os.path.join(root, n))
+
+                            # procesar en streaming
+                            for one in to_process:
+                                stream_split_single_file(one, OUT_DIR)
+
+                            shutil.rmtree(batch_dir, ignore_errors=True)
+                            processed += len(batch)
+                            st.write(f"✅ Lote OK. Progreso bloque: {processed}/{len(this_block)}")
+                            gc.collect()
+
+                        status.update(label="✅ Bloque finalizado", state="complete")
+                    except Exception as e:
+                        status.update(label="❌ Error en el bloque", state="error")
+                        st.exception(e)
+
+            st.subheader("📝 Log del bloque")
+            st.text(buf.getvalue())
+
+            # Actualiza manifest y decide si seguimos
+            save_manifest(remaining)
+            if remaining:
+                st.info(f"Quedan {len(remaining)} fichero(s) por procesar. Pulsa **⏭️ Procesar siguiente bloque** para continuar.")
             else:
-                st.caption("No hay CSV visibles ahora mismo; se está ofreciendo un ZIP ya existente.")
-    else:
-        st.info("No hay archivos para descargar en OUT_DIR (ni CSV ni ZIP).")
+                st.success("🎉 Todo procesado. Generando ZIP…")
+
+                # Construir ZIP final y mostrar descarga
+                def slugify(s: str) -> str:
+                    s = (s or '').strip()
+                    s = re.sub(r"\s+", "_", s)
+                    s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
+                    return s or "salida"
+
+                def build_outputs_zip(out_dir: str, csv_names: list[str], muni: str) -> str:
+                    ts = time.strftime("%Y%m%d_%H%M%S")
+                    zip_name = f"cat_{slugify(muni)}_{ts}.zip"
+                    zip_path = os.path.join(out_dir, zip_name)
+                    try:
+                        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_LZMA, allowZip64=True) as zf:
+                            for fn in csv_names:
+                                fp = os.path.join(out_dir, fn)
+                                if os.path.isfile(fp):
+                                    zf.write(fp, arcname=fn)
+                    except Exception:
+                        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as zf:
+                            for fn in csv_names:
+                                fp = os.path.join(out_dir, fn)
+                                if os.path.isfile(fp):
+                                    zf.write(fp, arcname=fn)
+                    return zip_path
+
+                esperados = [
+                    "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
+                    "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
+                ]
+                generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
+                if generados:
+                    zip_path = build_outputs_zip(OUT_DIR, generados, selected_muni_clean)
+                    fh = open(zip_path, "rb")
+                    st.download_button(
+                        "⬇️ Descargar todo (ZIP)",
+                        data=fh, file_name=os.path.basename(zip_path), mime="application/zip", key="dl_zip_final"
+                    )
+                    fh.close()
+                else:
+                    st.info("No se encontraron CSV para empaquetar.")
+
 
 
     
