@@ -2377,6 +2377,11 @@ def main():
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+
+    import pickle
+    import pandas as pd
+    from io import BytesIO
 
     # === ETL Catastro (subidas grandes, por lotes, robusto) ===
     OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
@@ -2434,6 +2439,147 @@ def main():
         s = re.sub(_ILLEGAL_WIN, "_", name).strip().rstrip(". ")
         return s or "out"
 
+    def convert_csv_to_binary(csv_path: str, output_format: str = "pickle") -> str:
+        """
+        Convierte un CSV a formato binario (pickle o parquet) para reducir tamaño.
+        
+        Args:
+            csv_path: Ruta al archivo CSV
+            output_format: "pickle" o "parquet"
+        
+        Returns:
+            Ruta al archivo binario generado
+        """
+        if not os.path.exists(csv_path):
+            return None
+        
+        # Leer CSV
+        try:
+            df = pd.read_csv(csv_path, dtype=str)  # Todo como string para preservar datos
+            
+            if output_format == "pickle":
+                binary_path = csv_path.replace('.csv', '.pkl')
+                with open(binary_path, 'wb') as f:
+                    pickle.dump(df, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            elif output_format == "parquet":
+                binary_path = csv_path.replace('.csv', '.parquet')
+                df.to_parquet(binary_path, compression='gzip', index=False)
+            
+            else:
+                raise ValueError("output_format debe ser 'pickle' o 'parquet'")
+            
+            return binary_path
+            
+        except Exception as e:
+            st.error(f"Error convirtiendo {csv_path} a binario: {e}")
+            return None
+
+    def create_individual_files(out_dir: str, file_names: list[str], muni: str, output_format: str = "pickle") -> list[dict]:
+        """
+        Crea archivos individuales en formato binario.
+        
+        Returns:
+            Lista de diccionarios con información de los archivos creados
+        """
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base = _sanitize_win_name(f"cat_{muni}_{ts}")
+        created_files = []
+        
+        for fname in file_names:
+            csv_path = os.path.join(out_dir, fname)
+            if not os.path.isfile(csv_path):
+                continue
+                
+            # Convertir a binario
+            binary_path = convert_csv_to_binary(csv_path, output_format)
+            if binary_path:
+                # Crear nombre final
+                extension = '.pkl' if output_format == 'pickle' else '.parquet'
+                base_name = fname.replace('.csv', '')
+                final_name = f"{base}_{base_name}{extension}"
+                final_path = os.path.join(out_dir, final_name)
+                
+                # Mover archivo
+                os.rename(binary_path, final_path)
+                
+                # Info del archivo
+                file_size = os.path.getsize(final_path)
+                csv_size = os.path.getsize(csv_path)
+                compression_ratio = (1 - file_size / csv_size) * 100 if csv_size > 0 else 0
+                
+                created_files.append({
+                    'name': final_name,
+                    'path': final_path,
+                    'size': file_size,
+                    'original_size': csv_size,
+                    'compression_ratio': compression_ratio,
+                    'format': output_format
+                })
+        
+        return created_files
+
+    def build_outputs_zip(out_dir: str, file_names: list[str], muni: str) -> str:
+        """Versión mejorada de creación de ZIP con mejor manejo de errores"""
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base = _sanitize_win_name(f"cat_{muni}_{ts}")
+        zip_path = os.path.join(out_dir, f"{base}.zip")
+        
+        # Crear ZIP temporal
+        temp_zip = zip_path + ".temp"
+        
+        try:
+            # Usar ZIP_STORED primero (sin compresión) para evitar problemas
+            with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+                files_added = 0
+                for fname in file_names:
+                    fpath = os.path.join(out_dir, fname)
+                    if not os.path.isfile(fpath):
+                        continue
+                        
+                    # Verificar que el archivo no esté vacío
+                    if os.path.getsize(fpath) == 0:
+                        continue
+                        
+                    arcname = _sanitize_win_name(os.path.basename(fname))
+                    try:
+                        zf.write(fpath, arcname=arcname)
+                        files_added += 1
+                    except Exception as e:
+                        st.warning(f"Error añadiendo {fname} al ZIP: {e}")
+                        continue
+            
+            if files_added == 0:
+                if os.path.exists(temp_zip):
+                    os.remove(temp_zip)
+                raise RuntimeError("No se pudieron añadir archivos al ZIP")
+            
+            # Mover archivo temporal al definitivo
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            os.rename(temp_zip, zip_path)
+            
+            # Verificar integridad del ZIP
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    bad_file = zf.testzip()
+                    if bad_file:
+                        raise zipfile.BadZipFile(f"Archivo corrupto en ZIP: {bad_file}")
+            except Exception as e:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                raise RuntimeError(f"ZIP corrupto creado: {e}")
+            
+            return zip_path
+            
+        except Exception as e:
+            # Limpiar archivos temporales
+            if os.path.exists(temp_zip):
+                os.remove(temp_zip)
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            raise e
+
     # --- NUEVO: procesado línea a línea, sin pandas ---
     def stream_split_single_file(src_path: str, out_dir: str):
         """
@@ -2441,8 +2587,7 @@ def main():
         correspondiente según el primer campo (código de registro).
         Detecta delimitador y BOM. Devuelve contadores por código.
         """
-        from csv import reader as csv_reader, writer as csv_writer
-        import gzip, io
+        import csv, gzip, io
         os.makedirs(out_dir, exist_ok=True) 
 
         REG_MAP = {
@@ -2481,16 +2626,16 @@ def main():
         def get_writer(target_name: str):
             path = os.path.join(out_dir, target_name)
             if target_name not in writers:
-                fh = open(path, "w", encoding="utf-8", newline="")
+                fh = open(path, "a", encoding="utf-8", newline="")
                 files[target_name] = fh
-                writers[target_name] = csv_writer(fh)
+                writers[target_name] = csv.writer(fh)
             return writers[target_name]
 
         with opener_txt() as fh:
             if delim:
                 # lector CSV con delimitador detectado
-                csv_reader_obj = csv_reader(fh, delimiter=delim)
-                for row in csv_reader_obj:
+                reader = csv.reader(fh, delimiter=delim)
+                for row in reader:
                     if not row:
                         continue
                     code = (row[0] or "").lstrip("\ufeff").strip()  # quita BOM si viene
@@ -2519,12 +2664,6 @@ def main():
 
         return counts
 
-    # Función para comprimir CSV a .gz (binario comprimido)
-    def compress_to_gz(csv_path: str, gz_path: str):
-        with open(csv_path, "rb") as f_in:
-            with gzip.open(gz_path, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-
     # ---- UI (staging + bloques) ----
     # --- al inicio de tu sección UI, antes de crear el file_uploader ---
     if "cat_reset" not in st.session_state:
@@ -2548,7 +2687,6 @@ def main():
 
     col1, col2, col3 = st.columns([2,1,1])
     with col1:
-
         files = st.file_uploader(
             "Sube CAT/CAT.gz (o un ZIP). Puedes subir en varias tandas.",
             type=["cat", "gz", "zip"],
@@ -2562,6 +2700,26 @@ def main():
         )
     with col3:
         lote_tam = st.number_input("Tamaño lote interno", min_value=1, max_value=20, value=5, step=1)
+
+    # Nueva opción para elegir formato de salida
+    st.markdown("### Opciones de salida")
+    col_out1, col_out2 = st.columns(2)
+    with col_out1:
+        output_type = st.radio(
+            "Tipo de salida:",
+            ["Archivos individuales binarios", "ZIP tradicional", "Ambos"],
+            index=0,
+            help="Los archivos binarios son más pequeños y rápidos de descargar"
+        )
+
+    with col_out2:
+        if output_type == "Archivos individuales binarios" or output_type == "Ambos":
+            binary_format = st.selectbox(
+                "Formato binario:",
+                ["pickle", "parquet"],
+                index=0,
+                help="Pickle es más rápido, Parquet es más estándar"
+            )
 
     # 1) Añadir a STAGING
     if files and st.button("➕ Añadir a staging (vuelca a disco y limpia memoria)"):
@@ -2696,40 +2854,73 @@ def main():
             if remaining:
                 st.info(f"Quedan {len(remaining)} fichero(s) por procesar. Pulsa **⏭️ Procesar siguiente bloque** para continuar.")
             else:
-                st.success("Todo procesado!!!!--->Generando archivos binarios comprimidos (.gz)…")
+                st.success("Todo procesado!!!!--->Generando archivos de salida…")
 
+                # Archivos esperados
                 esperados = [
                     "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
                     "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
                 ]
                 generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
-                if generados:
-                    # Comprimir cada CSV a .gz (binario comprimido para reducir tamaño)
-                    gz_files = []
-                    for fname in generados:
-                        csv_path = os.path.join(OUT_DIR, fname)
-                        gz_fname = fname + ".gz"
-                        gz_path = os.path.join(OUT_DIR, gz_fname)
-                        compress_to_gz(csv_path, gz_path)
-                        # Eliminar el CSV original para ahorrar espacio
-                        os.remove(csv_path)
-                        gz_files.append(gz_fname)
-
-                    # Proporcionar botones de descarga individuales para cada .gz
-                    st.subheader("Descargas individuales (archivos binarios comprimidos)")
-                    for gz_fname in gz_files:
-                        gz_path = os.path.join(OUT_DIR, gz_fname)
-                        with open(gz_path, "rb") as fh:
-                            st.download_button(
-                                label=f"⬇️ Descargar {gz_fname}",
-                                data=fh,
-                                file_name=gz_fname,
-                                mime="application/gzip",
-                                key=f"dl_{gz_fname}"
-                            )
+                
+                if not generados:
+                    st.info("No se encontraron CSV para procesar.")
                 else:
-                    st.info("No se encontraron CSV para comprimir.")
+                    # Crear archivos según la opción seleccionada
+                    if output_type == "Archivos individuales binarios" or output_type == "Ambos":
+                        st.info("Creando archivos binarios individuales...")
+                        try:
+                            binary_files = create_individual_files(OUT_DIR, generados, selected_muni_clean, binary_format)
+                            
+                            if binary_files:
+                                st.success(f"✅ Creados {len(binary_files)} archivos binarios")
+                                
+                                # Mostrar información de compresión
+                                total_original = sum(f['original_size'] for f in binary_files)
+                                total_compressed = sum(f['size'] for f in binary_files)
+                                overall_compression = (1 - total_compressed / total_original) * 100 if total_original > 0 else 0
+                                
+                                st.info(f"📊 Compresión total: {overall_compression:.1f}% ({total_original//1024//1024} MB → {total_compressed//1024//1024} MB)")
+                                
+                                # Crear botones de descarga individuales
+                                st.markdown("### Descargar archivos individuales:")
+                                cols = st.columns(min(3, len(binary_files)))
+                                for idx, file_info in enumerate(binary_files):
+                                    col = cols[idx % len(cols)]
+                                    with col:
+                                        with open(file_info['path'], 'rb') as f:
+                                            file_data = f.read()
+                                        
+                                        st.download_button(
+                                            f"📁 {file_info['name']}\n({file_info['size']//1024} KB, -{file_info['compression_ratio']:.1f}%)",
+                                            data=file_data,
+                                            file_name=file_info['name'],
+                                            mime="application/octet-stream",
+                                            key=f"dl_binary_{idx}"
+                                        )
+                            
+                        except Exception as e:
+                            st.error(f"Error creando archivos binarios: {e}")
 
+                    if output_type == "ZIP tradicional" or output_type == "Ambos":
+                        st.info("Creando ZIP...")
+                        try:
+                            zip_path = build_outputs_zip(OUT_DIR, generados, selected_muni_clean)
+                            with open(zip_path, "rb") as fh:
+                                zip_data = fh.read()
+                            
+                            st.download_button(
+                                f"⬇️ Descargar ZIP ({len(zip_data)//1024//1024} MB)",
+                                data=zip_data, 
+                                file_name=os.path.basename(zip_path), 
+                                mime="application/zip", 
+                                key="dl_zip_final"
+                            )
+                            st.success("✅ ZIP creado correctamente")
+                            
+                        except Exception as e:
+                            st.error(f"Error creando ZIP: {e}")
+                            st.info("💡 Los archivos individuales siguen disponibles arriba.")
 
         st.markdown("---")
         st.markdown("""
