@@ -2510,7 +2510,7 @@ def main():
 
 
     # ---- UI ----
-    st.markdown("## 🧱 ETL de juan (sube tus ficheros CAT)")
+    st.markdown("## 🧱 ETL de asier (sube tus ficheros CAT)")
 
     selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
     if not selected_muni_clean:
@@ -2640,17 +2640,66 @@ def main():
     st.subheader("📝 Log de ejecución")
     st.text(buf.getvalue())
 
+    MB = 1024 * 1024
+    def human(n):
+        for unit in ["B","KB","MB","GB"]:
+            if n < 1024:
+                return f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} TB"
     generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
     if generados:
         st.subheader("⬇️ Archivos generados")
         for fname in generados:
             fpath = os.path.join(OUT_DIR, fname)
-            with open(fpath, "rb") as fh:
-                st.download_button(f"Descargar {fname}", data=fh.read(), file_name=fname, mime="text/csv")
+            fsize = os.path.getsize(fpath)
+            st.write(f"**{fname}** — {human(fsize)}")
+            cols = st.columns([1,1,2])
+            with cols[0]:
+                # CSV directo si es pequeño (no .read()!)
+                if fsize <= 15 * MB:
+                    fh = open(fpath, "rb")
+                    st.download_button(
+                        "Descargar CSV",
+                        data=fh,                 # <— file-like, no bytes en RAM
+                        file_name=fname,
+                        mime="text/csv",
+                        key=f"dl_{fname}"
+                    )
+                    fh.close()
+                else:
+                    # Comprimir a .gz si no existe o está desactualizado
+                    gz_path = fpath + ".gz"
+                    if (not os.path.exists(gz_path)) or (os.path.getmtime(gz_path) < os.path.getmtime(fpath)):
+                        with open(fpath, "rb") as fin, gzip.open(gz_path, "wb", compresslevel=5) as fout:
+                            shutil.copyfileobj(fin, fout, length=1024*1024)  # 1 MB por chunk
+                    fh = open(gz_path, "rb")
+                    st.download_button(
+                        "Descargar (GZIP)",
+                        data=fh,
+                        file_name=os.path.basename(gz_path),
+                        mime="application/gzip",
+                        key=f"dl_{fname}_gz"
+                    )
+                    fh.close()
+            with cols[1]:
+                # Vista rápida, solo si el archivo no es gigante
+                if fsize <= 50 * MB:
+                    if st.button("Ver 1.000 filas", key=f"pv_{fname}"):
+                        try:
+                            import pandas as pd
+                            # motor python + autodetección delimitador, sin tipos pesados
+                            df = pd.read_csv(
+                                fpath, nrows=1000, engine="python", dtype=str,
+                                on_bad_lines="skip"
+                            )
+                            st.dataframe(df, width="stretch")
+                        except Exception as e:
+                            st.warning(f"No se pudo previsualizar: {e}")
     else:
         st.info("No se encontraron CSV esperados en la carpeta de salida.")
 
-
+    
 
 
 
