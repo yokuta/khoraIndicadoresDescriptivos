@@ -19,7 +19,7 @@ import contextlib
 import shutil, glob
 import comando  # tu ETL
 import gc
-
+import time
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2448,6 +2448,37 @@ def main():
             counts = {d: sample_text.count(d) for d in candidates}
             delim = max(counts, key=counts.get)
             return delim if counts[delim] > 0 else None
+    
+       
+
+        def slugify(s: str) -> str:
+            s = re.sub(r"\s+", "_", s.strip())
+            s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
+            return s or "salida"
+
+        def build_outputs_zip(out_dir: str, file_names: list[str], muni_name: str) -> str:
+            """
+            Crea un ZIP con compresión fuerte (DEFLATED nivel 9) sin cargar archivos en memoria.
+            Devuelve la ruta del ZIP.
+            """
+            os.makedirs(out_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            zip_name = f"cat_{slugify(muni_name)}_{ts}.zip"
+            zip_path = os.path.join(out_dir, zip_name)
+
+            with zipfile.ZipFile(
+                zip_path, mode="w",
+                compression=zipfile.ZIP_DEFLATED,  # máxima compatibilidad
+                compresslevel=9,                    # “super comprimido”
+                allowZip64=True
+            ) as zf:
+                for fname in file_names:
+                    fpath = os.path.join(out_dir, fname)
+                    if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
+                        # arcname evita meter rutas absolutas dentro del ZIP
+                        zf.write(fpath, arcname=fname)
+
+            return zip_path
 
         # Abrimos en binario para muestrear y decidir delimitador
         is_gz = src_path.lower().endswith(".gz")
@@ -2636,68 +2667,44 @@ def main():
                 status.update(label="❌ ETL con errores", state="error"); st.exception(e)
 
 
-    # 5) Log y descargas
+    # 5) Log y descarga única en ZIP
     st.subheader("📝 Log de ejecución")
     st.text(buf.getvalue())
 
-    MB = 1024 * 1024
-    def human(n):
-        for unit in ["B","KB","MB","GB"]:
-            if n < 1024:
-                return f"{n:.1f} {unit}"
-            n /= 1024
-        return f"{n:.1f} TB"
     generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
     if generados:
-        st.subheader("⬇️ Archivos generados")
-        for fname in generados:
-            fpath = os.path.join(OUT_DIR, fname)
-            fsize = os.path.getsize(fpath)
-            st.write(f"**{fname}** — {human(fsize)}")
-            cols = st.columns([1,1,2])
-            with cols[0]:
-                # CSV directo si es pequeño (no .read()!)
-                if fsize <= 15 * MB:
-                    fh = open(fpath, "rb")
-                    st.download_button(
-                        "Descargar CSV",
-                        data=fh,                 # <— file-like, no bytes en RAM
-                        file_name=fname,
-                        mime="text/csv",
-                        key=f"dl_{fname}"
-                    )
-                    fh.close()
-                else:
-                    # Comprimir a .gz si no existe o está desactualizado
-                    gz_path = fpath + ".gz"
-                    if (not os.path.exists(gz_path)) or (os.path.getmtime(gz_path) < os.path.getmtime(fpath)):
-                        with open(fpath, "rb") as fin, gzip.open(gz_path, "wb", compresslevel=5) as fout:
-                            shutil.copyfileobj(fin, fout, length=1024*1024)  # 1 MB por chunk
-                    fh = open(gz_path, "rb")
-                    st.download_button(
-                        "Descargar (GZIP)",
-                        data=fh,
-                        file_name=os.path.basename(gz_path),
-                        mime="application/gzip",
-                        key=f"dl_{fname}_gz"
-                    )
-                    fh.close()
-            with cols[1]:
-                # Vista rápida, solo si el archivo no es gigante
-                if fsize <= 50 * MB:
-                    if st.button("Ver 1.000 filas", key=f"pv_{fname}"):
-                        try:
-                           
-                            # motor python + autodetección delimitador, sin tipos pesados
-                            df = pd.read_csv(
-                                fpath, nrows=1000, engine="python", dtype=str,
-                                on_bad_lines="skip"
-                            )
-                            st.dataframe(df, width="stretch")
-                        except Exception as e:
-                            st.warning(f"No se pudo previsualizar: {e}")
+        # Construye el ZIP solo cuando hay algo que empaquetar
+        zip_path = build_outputs_zip(OUT_DIR, generados, selected_muni_clean)
+
+        st.subheader("⬇️ Resultados")
+        st.write(f"Se han generado {len(generados)} CSV. Descarga todo en un único ZIP:")
+
+        # No hagas .read(): pasa el file-like para no cargarlo en memoria
+        fh = open(zip_path, "rb")
+        st.download_button(
+            "Descargar todo (ZIP comprimido)",
+            data=fh,
+            file_name=os.path.basename(zip_path),
+            mime="application/zip",
+            key="dl_zip_resultados"
+        )
+        fh.close()
+
+        # (opcional) muestra un resumen de tamaños sin previsualizar dataframes
+        import os
+        def human(n):
+            for unit in ["B","KB","MB","GB"]:
+                if n < 1024: return f"{n:.1f} {unit}"
+                n /= 1024
+            return f"{n:.1f} TB"
+
+        with st.expander("Ver tamaños de archivos incluidos"):
+            for fname in generados:
+                fpath = os.path.join(OUT_DIR, fname)
+                st.write(f"- **{fname}** — {human(os.path.getsize(fpath))}")
     else:
         st.info("No se encontraron CSV esperados en la carpeta de salida.")
+
 
     
 
