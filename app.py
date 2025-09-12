@@ -2542,7 +2542,12 @@ def main():
 
 
     # ---- UI (staging + bloques) ----
-    
+    # --- al inicio de tu sección UI, antes de crear el file_uploader ---
+    if "cat_reset" not in st.session_state:
+        st.session_state["cat_reset"] = 0  # contador para forzar reset del uploader
+
+    uploader_key = f"cat_up_{st.session_state['cat_reset']}"
+
     SID = st.session_state.setdefault("etl_sid", str(uuid.uuid4()))
     STAGE_DIR = os.path.join("/tmp/etl_stage", SID)
     WORK_DIR  = os.path.join("/tmp/etl_work",  SID)
@@ -2564,7 +2569,7 @@ def main():
             "Sube CAT/CAT.gz (o un ZIP). Puedes subir en varias tandas.",
             type=["cat", "gz", "zip"],
             accept_multiple_files=True,
-            key=uploader_key,   # <- ¡clave dinámica!
+            key=uploader_key,  # <- ¡clave dinámica!
         )
 
     with col2:
