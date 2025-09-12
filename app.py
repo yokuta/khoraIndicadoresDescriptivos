@@ -2370,6 +2370,10 @@ def main():
   
 
     #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
 
 
 
@@ -2420,8 +2424,64 @@ def main():
                 dst = os.path.join(final_out_dir, fname)
                 append_csv(src, dst)
 
+
+    # --- NUEVO: procesado línea a línea, sin pandas ---
+    def stream_split_single_file(src_path: str, out_dir: str):
+        """
+        Lee un .cat o .cat.gz en streaming y vuelca cada línea al CSV
+        correspondiente según el primer campo (código de registro).
+        No carga nada en memoria salvo la línea actual.
+        """
+        import csv, gzip
+
+        # Mapea códigos -> nombre de CSV final
+        REG_MAP = {
+            "11": "reg11_finca.csv",
+            "13": "reg13_uc.csv",
+            "14": "reg14_construccion.csv",
+            "15": "reg15_inmueble.csv",
+            "16": "reg16_reparto.csv",
+            "17": "reg17_cultivo.csv",
+        }
+
+        # Abrimos outputs on-demand
+        writers = {}
+        files = {}
+
+        def get_writer(target_name: str):
+            path = os.path.join(out_dir, target_name)
+            if target_name not in writers:
+                # abrimos en append, sin cabecera (el CAT original no la trae)
+                fh = open(path, "a", encoding="utf-8", newline="")
+                files[target_name] = fh
+                writers[target_name] = csv.writer(fh)
+            return writers[target_name]
+
+        openf = gzip.open if src_path.lower().endswith(".gz") else open
+        # El CAT suele venir en Latin-1; cambiamos a 'replace' por si hay caracteres raros
+        with openf(src_path, mode="rt", encoding="latin-1", errors="replace", newline="") as fh:
+            reader = csv.reader(fh, delimiter="|")
+            for row in reader:
+                if not row:
+                    continue
+                code = (row[0] or "").strip()
+                target = REG_MAP.get(code)
+                if not target:
+                    # Si aparece un código desconocido, lo ignoramos
+                    continue
+                w = get_writer(target)
+                w.writerow(row)
+
+        # cerrar ficheros abiertos
+        for fh in files.values():
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+
     # ---- UI ----
-    st.markdown("## 🧱 ETL Catastro (sube tus ficheros CAT)")
+    st.markdown("## 🧱 ETL de juan (sube tus ficheros CAT)")
 
     selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
     if not selected_muni_clean:
@@ -2484,14 +2544,14 @@ def main():
         st.error("No se encontraron .cat / .cat.gz en los archivos subidos (ni dentro de ZIPs).")
         st.stop()
 
+    # 4) Procesar por lotes “reales”, SOLO streaming (sin run_etl)
     buf = io.StringIO()
     esperados = [
         "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
         "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
-        "resumen_parcela.csv",
+        # "resumen_parcela.csv",  # <- esto no lo genera el modo streaming "raw"
     ]
 
-    # 4) Procesar por lotes “reales”, pero cada lote se materializa a disco y se borra enseguida
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         with st.status("Procesando…", expanded=True) as status:
             try:
@@ -2509,49 +2569,39 @@ def main():
 
                     status.update(label=f"Lote {processed+1}… ({processed}/{total})")
 
-                    # preparar carpeta de lote y materializar SOLO los miembros necesarios
+                    # 4.1 Materializar SOLO el lote
                     batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
                     for item in batch:
                         if item["kind"] == "file":
-                            # mover (no duplicar)
                             src = item["path"]
                             dst = os.path.join(batch_dir, os.path.basename(item["name"]))
                             shutil.move(src, dst)
                         else:
-                            # extraer SOLO ese miembro del zip
                             zpath = item["zip_path"]
                             member = item["member"]
                             with zipfile.ZipFile(zpath, "r") as zf:
-                                # extrae directo al batch_dir
                                 zf.extract(member, path=batch_dir)
-                                # si el zip tenía subcarpetas, aplanamos
                                 extracted = os.path.join(batch_dir, member)
                                 flat = os.path.join(batch_dir, os.path.basename(member))
                                 if extracted != flat:
                                     os.makedirs(os.path.dirname(flat), exist_ok=True)
                                     try:
                                         os.replace(extracted, flat)
-                                        # borra árbol vacío
-                                        base = os.path.dirname(extracted)
-                                        shutil.rmtree(os.path.join(batch_dir, member.split("/")[0]), ignore_errors=True)
+                                        # limpia posible subcarpeta vacía
+                                        top = member.split("/")[0]
+                                        shutil.rmtree(os.path.join(batch_dir, top), ignore_errors=True)
                                     except Exception:
                                         pass
 
-                    # salida temporal del lote
-                    batch_out = tempfile.mkdtemp(prefix="out_batch_")
+                    # 4.2 STREAMING: dividir por código y escribir directo a OUT_DIR
+                    files_in_batch = [os.path.join(batch_dir, n) for n in os.listdir(batch_dir)]
+                    for one in files_in_batch:
+                        stream_split_single_file(one, OUT_DIR)
 
-                    # ejecutar ETL sobre el lote
-                    print(f"[Lote] ETL sobre {len(os.listdir(batch_dir))} fichero(s)…")
-                    comando.run_etl(batch_dir, selected_muni_clean, batch_out)
-
-                    # fusionar en OUT_DIR y limpiar
-                    merge_outputs(batch_out, OUT_DIR, esperados)
+                    # 4.3 Limpieza y progreso
                     shutil.rmtree(batch_dir, ignore_errors=True)
-                    shutil.rmtree(batch_out,  ignore_errors=True)
-
                     processed += len(batch)
                     st.write(f"✅ Lote completado. Progreso: {processed}/{total}")
-
                     gc.collect()
 
                 status.update(label="✅ ETL finalizado", state="complete")
