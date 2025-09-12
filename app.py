@@ -2380,10 +2380,7 @@ def main():
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
 
-    import pickle
-    import pandas as pd
-    from io import BytesIO
-    import comando  # Import your working ETL script
+
 
     # === ETL Catastro (subidas grandes, por lotes, robusto) ===
     OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
