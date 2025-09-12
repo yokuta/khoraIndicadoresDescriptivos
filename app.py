@@ -2424,7 +2424,33 @@ def main():
                 dst = os.path.join(final_out_dir, fname)
                 append_csv(src, dst)
 
+    def slugify(s: str) -> str:
+        s = re.sub(r"\s+", "_", s.strip())
+        s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
+        return s or "salida"
 
+    def build_outputs_zip(out_dir: str, file_names: list[str], muni_name: str) -> str:
+        """
+        Crea un ZIP con compresión fuerte (DEFLATED nivel 9) sin cargar archivos en memoria.
+        Devuelve la ruta del ZIP.
+        """
+        os.makedirs(out_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        zip_name = f"cat_{slugify(muni_name)}_{ts}.zip"
+        zip_path = os.path.join(out_dir, zip_name)
+        with zipfile.ZipFile(
+            zip_path, mode="w",
+            compression=zipfile.ZIP_DEFLATED,  # máxima compatibilidad
+            compresslevel=9,                    # “super comprimido”
+            allowZip64=True
+        ) as zf:
+            for fname in file_names:
+                fpath = os.path.join(out_dir, fname)
+                if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
+                    # arcname evita meter rutas absolutas dentro del ZIP
+                    zf.write(fpath, arcname=fname)
+        return zip_path
+    
     # --- NUEVO: procesado línea a línea, sin pandas ---
     def stream_split_single_file(src_path: str, out_dir: str):
         """
@@ -2451,34 +2477,7 @@ def main():
     
        
 
-        def slugify(s: str) -> str:
-            s = re.sub(r"\s+", "_", s.strip())
-            s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
-            return s or "salida"
-
-        def build_outputs_zip(out_dir: str, file_names: list[str], muni_name: str) -> str:
-            """
-            Crea un ZIP con compresión fuerte (DEFLATED nivel 9) sin cargar archivos en memoria.
-            Devuelve la ruta del ZIP.
-            """
-            os.makedirs(out_dir, exist_ok=True)
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            zip_name = f"cat_{slugify(muni_name)}_{ts}.zip"
-            zip_path = os.path.join(out_dir, zip_name)
-
-            with zipfile.ZipFile(
-                zip_path, mode="w",
-                compression=zipfile.ZIP_DEFLATED,  # máxima compatibilidad
-                compresslevel=9,                    # “super comprimido”
-                allowZip64=True
-            ) as zf:
-                for fname in file_names:
-                    fpath = os.path.join(out_dir, fname)
-                    if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
-                        # arcname evita meter rutas absolutas dentro del ZIP
-                        zf.write(fpath, arcname=fname)
-
-            return zip_path
+        
 
         # Abrimos en binario para muestrear y decidir delimitador
         is_gz = src_path.lower().endswith(".gz")
