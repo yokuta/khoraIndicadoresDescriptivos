@@ -2690,7 +2690,7 @@ def main():
         fh.close()
 
         # (opcional) muestra un resumen de tamaños sin previsualizar dataframes
-        import os
+    
         def human(n):
             for unit in ["B","KB","MB","GB"]:
                 if n < 1024: return f"{n:.1f} {unit}"
