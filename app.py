@@ -2408,7 +2408,7 @@ def main():
                 append_csv(src, dst)
 
     # ---- UI ----
-    st.markdown("## 🧱 ETL Catastro (sube tus ficheros CAT)")
+    st.markdown("## 🧱 ETL Catastro JUAAAAN (sube tus ficheros CAT)")
 
     selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
     if not selected_muni_clean:
@@ -2456,13 +2456,19 @@ def main():
                 except OSError:
                     pass
 
-        # 3) Recopilar archivos .cat y .cat.gz
-        cat_files = sorted(glob.glob(os.path.join(tmp_in, "*.cat"))) + \
-                    sorted(glob.glob(os.path.join(tmp_in, "*.cat.gz")))
+        # 3) Recopilar archivos .cat y .cat.gz (recursivo y case-insensitive)
+        cat_files = []
+        for root, dirs, files_names in os.walk(tmp_in):
+            for name in files_names:
+                lname = name.lower()
+                if lname.endswith(".cat") or lname.endswith(".cat.gz"):
+                    cat_files.append(os.path.join(root, name))
+
         total = len(cat_files)
         if total == 0:
             st.error("No se encontraron ficheros .cat / .cat.gz tras preparar la entrada.")
             st.stop()
+
 
         # 4) Ejecutar ETL por lotes
         buf = io.StringIO()
