@@ -2430,11 +2430,10 @@ def main():
         """
         Lee un .cat o .cat.gz en streaming y vuelca cada línea al CSV
         correspondiente según el primer campo (código de registro).
-        No carga nada en memoria salvo la línea actual.
+        Detecta delimitador y BOM. Devuelve contadores por código.
         """
-        import csv, gzip
+        import csv, gzip, io
 
-        # Mapea códigos -> nombre de CSV final
         REG_MAP = {
             "11": "reg11_finca.csv",
             "13": "reg13_uc.csv",
@@ -2444,40 +2443,70 @@ def main():
             "17": "reg17_cultivo.csv",
         }
 
-        # Abrimos outputs on-demand
-        writers = {}
-        files = {}
+        def detect_delimiter(sample_text: str) -> str | None:
+            candidates = ["|", ";", "\t", ","]
+            counts = {d: sample_text.count(d) for d in candidates}
+            delim = max(counts, key=counts.get)
+            return delim if counts[delim] > 0 else None
+
+        # Abrimos en binario para muestrear y decidir delimitador
+        is_gz = src_path.lower().endswith(".gz")
+        opener_bin = (lambda: open(src_path, "rb")) if not is_gz else (lambda: gzip.open(src_path, "rb"))
+        with opener_bin() as fb:
+            sample = fb.read(65536)  # 64 KB
+            try:
+                sample_txt = sample.decode("latin-1", errors="replace")
+            except Exception:
+                sample_txt = sample.decode("utf-8", errors="replace")
+            delim = detect_delimiter(sample_txt)
+
+        # Reabrimos en texto para iterar líneas
+        opener_txt = (lambda: open(src_path, "rt", encoding="latin-1", errors="replace", newline="")) \
+                    if not is_gz else (lambda: gzip.open(src_path, "rt", encoding="latin-1", errors="replace", newline=""))
+
+        writers, files = {}, {}
+        counts = {k: 0 for k in REG_MAP.keys()}
 
         def get_writer(target_name: str):
             path = os.path.join(out_dir, target_name)
             if target_name not in writers:
-                # abrimos en append, sin cabecera (el CAT original no la trae)
                 fh = open(path, "a", encoding="utf-8", newline="")
                 files[target_name] = fh
                 writers[target_name] = csv.writer(fh)
             return writers[target_name]
 
-        openf = gzip.open if src_path.lower().endswith(".gz") else open
-        # El CAT suele venir en Latin-1; cambiamos a 'replace' por si hay caracteres raros
-        with openf(src_path, mode="rt", encoding="latin-1", errors="replace", newline="") as fh:
-            reader = csv.reader(fh, delimiter="|")
-            for row in reader:
-                if not row:
-                    continue
-                code = (row[0] or "").strip()
-                target = REG_MAP.get(code)
-                if not target:
-                    # Si aparece un código desconocido, lo ignoramos
-                    continue
-                w = get_writer(target)
-                w.writerow(row)
+        with opener_txt() as fh:
+            if delim:
+                # lector CSV con delimitador detectado
+                reader = csv.reader(fh, delimiter=delim)
+                for row in reader:
+                    if not row:
+                        continue
+                    code = (row[0] or "").lstrip("\ufeff").strip()  # quita BOM si viene
+                    target = REG_MAP.get(code)
+                    if not target:
+                        continue
+                    get_writer(target).writerow(row)
+                    counts[code] += 1
+            else:
+                # fallback sin delimitador: usa 2 primeros chars como código y vuelca la línea entera
+                # (mejor ajustarlo si tienes especificación de ancho fijo)
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    s = line.lstrip("\ufeff")
+                    code = s[:2].strip()
+                    target = REG_MAP.get(code)
+                    if not target:
+                        continue
+                    get_writer(target).writerow([s.rstrip("\r\n")])
+                    counts[code] += 1
 
-        # cerrar ficheros abiertos
         for fh in files.values():
-            try:
-                fh.close()
-            except Exception:
-                pass
+            try: fh.close()
+            except: pass
+
+        return counts
 
 
     # ---- UI ----
@@ -2549,7 +2578,6 @@ def main():
     esperados = [
         "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
         "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
-        # "resumen_parcela.csv",  # <- esto no lo genera el modo streaming "raw"
     ]
 
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -2561,7 +2589,6 @@ def main():
                     batch = inputs[i:i+int(lote_tam)]
                     i += int(lote_tam)
 
-                    # Guardas de recursos
                     if not have_disk(256):
                         raise RuntimeError("⛔️ Espacio insuficiente en /tmp (<256 MB libres).")
                     if mem_free_mb() < 256:
@@ -2569,49 +2596,45 @@ def main():
 
                     status.update(label=f"Lote {processed+1}… ({processed}/{total})")
 
-                    # 4.1 Materializar SOLO el lote
+                    # Materializa SOLO el lote (puede haber subcarpetas dentro del ZIP)
                     batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
                     for item in batch:
                         if item["kind"] == "file":
-                            src = item["path"]
-                            dst = os.path.join(batch_dir, os.path.basename(item["name"]))
-                            shutil.move(src, dst)
+                            shutil.move(item["path"], os.path.join(batch_dir, os.path.basename(item["name"])))
                         else:
-                            zpath = item["zip_path"]
-                            member = item["member"]
-                            with zipfile.ZipFile(zpath, "r") as zf:
-                                zf.extract(member, path=batch_dir)
-                                extracted = os.path.join(batch_dir, member)
-                                flat = os.path.join(batch_dir, os.path.basename(member))
-                                if extracted != flat:
-                                    os.makedirs(os.path.dirname(flat), exist_ok=True)
-                                    try:
-                                        os.replace(extracted, flat)
-                                        # limpia posible subcarpeta vacía
-                                        top = member.split("/")[0]
-                                        shutil.rmtree(os.path.join(batch_dir, top), ignore_errors=True)
-                                    except Exception:
-                                        pass
+                            with zipfile.ZipFile(item["zip_path"], "r") as zf:
+                                zf.extract(item["member"], path=batch_dir)
 
-                    # 4.2 STREAMING: dividir por código y escribir directo a OUT_DIR
-                    files_in_batch = [os.path.join(batch_dir, n) for n in os.listdir(batch_dir)]
-                    for one in files_in_batch:
-                        stream_split_single_file(one, OUT_DIR)
+                    # Recoge .cat/.cat.gz de forma RECURSIVA
+                    to_process = []
+                    for root, _, names in os.walk(batch_dir):
+                        for n in names:
+                            ln = n.lower()
+                            if ln.endswith(".cat") or ln.endswith(".cat.gz"):
+                                to_process.append(os.path.join(root, n))
 
-                    # 4.3 Limpieza y progreso
+                    # Procesa en streaming y acumula contadores
+                    total_counts = {"11":0,"13":0,"14":0,"15":0,"16":0,"17":0}
+                    for one in to_process:
+                        c = stream_split_single_file(one, OUT_DIR)
+                        for k,v in c.items():
+                            total_counts[k] += v
+
+                    # Limpieza y progreso
                     shutil.rmtree(batch_dir, ignore_errors=True)
                     processed += len(batch)
-                    st.write(f"✅ Lote completado. Progreso: {processed}/{total}")
+                    st.write(f"✅ Lote completado. Progreso: {processed}/{total} — "
+                            f"Regs: 11={total_counts['11']},13={total_counts['13']},14={total_counts['14']},"
+                            f"15={total_counts['15']},16={total_counts['16']},17={total_counts['17']}")
                     gc.collect()
 
                 status.update(label="✅ ETL finalizado", state="complete")
 
             except MemoryError as e:
-                status.update(label="❌ Sin memoria", state="error")
-                st.error(str(e))
+                status.update(label="❌ Sin memoria", state="error"); st.error(str(e))
             except Exception as e:
-                status.update(label="❌ ETL con errores", state="error")
-                st.exception(e)
+                status.update(label="❌ ETL con errores", state="error"); st.exception(e)
+
 
     # 5) Log y descargas
     st.subheader("📝 Log de ejecución")
