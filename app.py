@@ -20,7 +20,9 @@ import shutil, glob
 import comando  # tu ETL
 import gc
 import time
-import uuid, json
+import uuid, json 
+
+
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2430,27 +2432,49 @@ def main():
         s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
         return s or "salida"
 
-    def build_outputs_zip(out_dir: str, file_names: list[str], muni_name: str) -> str:
-        """
-        Crea un ZIP con compresión fuerte (DEFLATED nivel 9) sin cargar archivos en memoria.
-        Devuelve la ruta del ZIP.
-        """
-        os.makedirs(out_dir, exist_ok=True)
+ 
+
+    _ILLEGAL_WIN = r'[<>:"/\\|?*]'
+
+    def _sanitize_win_name(name: str) -> str:
+        # quita caracteres no válidos y puntos/espacios al final
+        s = re.sub(_ILLEGAL_WIN, "_", name).strip().rstrip(". ")
+        return s or "out"
+
+    def build_outputs_zip(out_dir: str, file_names: list[str], muni: str) -> str:
         ts = time.strftime("%Y%m%d_%H%M%S")
-        zip_name = f"cat_{slugify(muni_name)}_{ts}.zip"
-        zip_path = os.path.join(out_dir, zip_name)
+        base = _sanitize_win_name(f"cat_{muni}_{ts}")
+        zip_path = os.path.join(out_dir, f"{base}.zip")
+        tmp_zip = zip_path + ".tmp"
+
+        # crear ZIP con compatibilidad máxima y ZIP64 activado
         with zipfile.ZipFile(
-            zip_path, mode="w",
-            compression=zipfile.ZIP_DEFLATED,  # máxima compatibilidad
-            compresslevel=9,                    # “super comprimido”
+            tmp_zip, "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
             allowZip64=True
         ) as zf:
             for fname in file_names:
                 fpath = os.path.join(out_dir, fname)
-                if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
-                    # arcname evita meter rutas absolutas dentro del ZIP
-                    zf.write(fpath, arcname=fname)
+                if not os.path.isfile(fpath):
+                    continue
+                arcname = _sanitize_win_name(os.path.basename(fname))  # nada de subcarpetas
+                zf.write(fpath, arcname=arcname)
+
+        # mover a definitivo (flush + close garantizados)
+        os.replace(tmp_zip, zip_path)
+
+        # validación: CRC de todos los miembros
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            bad = zf.testzip()
+            if bad:
+                # borra el ZIP malo para no ofrecer descargas rotas
+                try: os.remove(zip_path)
+                except: pass
+                raise RuntimeError(f"ZIP corrupto: primer fichero con CRC incorrecto: {bad}")
+
         return zip_path
+
     
     # --- NUEVO: procesado línea a línea, sin pandas ---
     def stream_split_single_file(src_path: str, out_dir: str):
@@ -2705,7 +2729,7 @@ def main():
                         status.update(label="❌ Error en el bloque", state="error")
                         st.exception(e)
 
-            st.subheader("📝 Log del bloque")
+            st.subheader("Log del bloque")
             st.text(buf.getvalue())
 
             # Actualiza manifest y decide si seguimos
@@ -2713,7 +2737,7 @@ def main():
             if remaining:
                 st.info(f"Quedan {len(remaining)} fichero(s) por procesar. Pulsa **⏭️ Procesar siguiente bloque** para continuar.")
             else:
-                st.success("🎉 Todo procesado. Generando ZIP…")
+                st.success("Todo procesado!!!!--->Generando ZIP…")
 
                 # Construir ZIP final y mostrar descarga
                 def slugify(s: str) -> str:
