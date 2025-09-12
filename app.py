@@ -2667,11 +2667,11 @@ def main():
                 status.update(label="❌ ETL con errores", state="error"); st.exception(e)
 
 
-    # 5) Log y descarga única en ZIP (robusto)
+    # 5) Log y descarga única en ZIP (siempre que haya algo descargable)
     st.subheader("📝 Log de ejecución")
     st.text(buf.getvalue())
 
-    # listar lo que realmente hay en OUT_DIR
+    # Listado real de OUT_DIR para depurar
     try:
         listing = sorted(os.listdir(OUT_DIR))
         st.caption(f"OUT_DIR = {OUT_DIR}")
@@ -2679,59 +2679,74 @@ def main():
     except Exception as e:
         st.warning(f"No pude listar OUT_DIR: {e}")
 
-    # recoger todos los CSV no vacíos (sin depender de 'esperados')
-    import glob
-    csv_paths = [p for p in glob.glob(os.path.join(OUT_DIR, "*.csv")) if os.path.getsize(p) > 0]
+    import os, re, glob, time, zipfile
 
-    if csv_paths:
-        # intenta compresión máxima (LZMA); si falla, cae a DEFLATED nivel 9
-        import zipfile, time
-        def slugify(s: str) -> str:
-            s = re.sub(r"\s+", "_", s.strip())
-            s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
-            return s or "salida"
+    def slugify(s: str) -> str:
+        s = (s or "").strip()
+        s = re.sub(r"\s+", "_", s)
+        s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
+        return s or "salida"
 
+    def human(n):
+        for unit in ["B","KB","MB","GB","TB"]:
+            if n < 1024: return f"{n:.1f} {unit}"
+            n /= 1024
+
+    def build_zip_from(paths: list[str], out_dir: str, muni: str) -> str:
         ts = time.strftime("%Y%m%d_%H%M%S")
-        zip_name = f"cat_{slugify(selected_muni_clean)}_{ts}.zip"
-        zip_path = os.path.join(OUT_DIR, zip_name)
-
+        zip_name = f"cat_{slugify(muni)}_{ts}.zip"
+        zip_path = os.path.join(out_dir, zip_name)
+        # Intento con LZMA (mejor compresión). Si falla, DEFLATED nivel 9.
         try:
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_LZMA, allowZip64=True) as zf:
-                for p in csv_paths:
+                for p in paths:
                     zf.write(p, arcname=os.path.basename(p))
-            used_algo = "ZIP_LZMA"
+            return zip_path
         except Exception:
-            with zipfile.ZipFile(zip_path, "w",
-                                compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as zf:
-                for p in csv_paths:
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED,
+                                compresslevel=9, allowZip64=True) as zf:
+                for p in paths:
                     zf.write(p, arcname=os.path.basename(p))
-            used_algo = "ZIP_DEFLATED(level=9)"
+            return zip_path
 
+    # 1) CSV que existan (si quieres excluir vacíos, usa 'if os.path.getsize(p) > 0')
+    csv_paths = sorted(glob.glob(os.path.join(OUT_DIR, "*.csv")))
+
+    # 2) Zips ya existentes en OUT_DIR (por si el paso anterior ya creó uno)
+    zip_paths = sorted(glob.glob(os.path.join(OUT_DIR, "cat_*.zip")), key=os.path.getmtime, reverse=True)
+
+    zip_path_to_offer = None
+    if csv_paths:
+        # Construye ZIP ahora mismo con lo que haya
+        zip_path_to_offer = build_zip_from(csv_paths, OUT_DIR, selected_muni_clean)
+    elif zip_paths:
+        # No hay CSV (o están a 0B) pero ya existe al menos un ZIP anterior
+        zip_path_to_offer = zip_paths[0]
+
+    if zip_path_to_offer and os.path.isfile(zip_path_to_offer):
         st.subheader("⬇️ Resultados")
-        st.write(f"Se han generado **{len(csv_paths)}** CSV. "
-                f"Descárgalos en un único ZIP (compresión: {used_algo}):")
+        st.write(f"Descarga todo en un único ZIP:")
+        st.write(f"- **Archivo:** `{os.path.basename(zip_path_to_offer)}` — {human(os.path.getsize(zip_path_to_offer))}")
 
-        fh = open(zip_path, "rb")        # no leer en memoria
+        # Importante: pasar el *file-like* sin leer en memoria
+        fh = open(zip_path_to_offer, "rb")
         st.download_button(
             "Descargar todo (ZIP)",
             data=fh,
-            file_name=os.path.basename(zip_path),
+            file_name=os.path.basename(zip_path_to_offer),
             mime="application/zip",
             key="dl_zip_resultados"
         )
         fh.close()
 
-        # resumen de tamaños
-        def human(n):
-            for unit in ["B","KB","MB","GB","TB"]:
-                if n < 1024: return f"{n:.1f} {unit}"
-                n /= 1024
-        with st.expander("Ver tamaños de archivos incluidos"):
-            for p in sorted(csv_paths):
-                st.write(f"- **{os.path.basename(p)}** — {human(os.path.getsize(p))}")
+        with st.expander("Ver tamaños de CSV incluidos"):
+            if csv_paths:
+                for p in csv_paths:
+                    st.write(f"- **{os.path.basename(p)}** — {human(os.path.getsize(p))}")
+            else:
+                st.caption("No hay CSV visibles ahora mismo; se está ofreciendo un ZIP ya existente.")
     else:
-        st.info("No se encontraron CSV para empaquetar en OUT_DIR.")
-
+        st.info("No hay archivos para descargar en OUT_DIR (ni CSV ni ZIP).")
 
 
     
