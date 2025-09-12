@@ -22,7 +22,8 @@ import gc
 import time
 import uuid, json 
 import csv, gzip
-
+import pickle
+from io import BytesIO
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2379,9 +2380,7 @@ def main():
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
 
-    import pickle
-    import pandas as pd
-    from io import BytesIO
+    
 
     # === ETL Catastro (subidas grandes, por lotes, robusto) ===
     OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
