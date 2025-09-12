@@ -16,13 +16,6 @@ import streamlit as st
 import traceback, sys, os
 st.set_page_config(page_title="Indicadores Khôra", layout="wide")
 import contextlib 
-import shutil, glob
-import comando  # tu ETL
-import gc
-import time
-import uuid, json 
-import csv, gzip
-
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2370,9 +2363,12 @@ def main():
     else:
         st.info("Selecciona un municipio para calcular áreas e intersecciones.")
 
-  
 
-    #-----------------------------------------------------------------------------------
+
+
+    #!--------------------------------------------------------------
+    #!--------------------------------------------------------------
+    #!--------------------------------------------------------------
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
@@ -2380,8 +2376,9 @@ def main():
     #-----------------------------------------------------------------------------------
 
     import pickle
-
+    import pandas as pd
     from io import BytesIO
+    import comando  # Import your working ETL script
 
     # === ETL Catastro (subidas grandes, por lotes, robusto) ===
     OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
@@ -2408,24 +2405,6 @@ def main():
             return vals.get("MemAvailable", vals.get("MemFree", 0)) // 1024
         except Exception:
             return 0
-
-    def append_csv(src_path: str, dst_path: str):
-        """Append sin duplicar cabeceras, en binario y por chunks."""
-        if not os.path.exists(dst_path):
-            with open(src_path, "rb") as src, open(dst_path, "wb") as dst:
-                shutil.copyfileobj(src, dst, length=1024*1024)
-            return
-        with open(src_path, "rb") as src, open(dst_path, "ab") as dst:
-            _ = src.readline()  # saltar cabecera
-            shutil.copyfileobj(src, dst, length=1024*1024)
-
-    def merge_outputs(batch_out_dir: str, final_out_dir: str, esperados: list[str]):
-        os.makedirs(final_out_dir, exist_ok=True)
-        for fname in esperados:
-            src = os.path.join(batch_out_dir, fname)
-            if os.path.isfile(src):
-                dst = os.path.join(final_out_dir, fname)
-                append_csv(src, dst)
 
     def slugify(s: str) -> str:
         s = re.sub(r"\s+", "_", s.strip())
@@ -2580,89 +2559,60 @@ def main():
                 os.remove(zip_path)
             raise e
 
-    # --- NUEVO: procesado línea a línea, sin pandas ---
-    def stream_split_single_file(src_path: str, out_dir: str):
+    def process_batch_with_comando(batch_dir: str, muni: str, final_out_dir: str):
         """
-        Lee un .cat o .cat.gz en streaming y vuelca cada línea al CSV
-        correspondiente según el primer campo (código de registro).
-        Detecta delimitador y BOM. Devuelve contadores por código.
+        Procesa un lote usando la lógica de comando.py que sabemos que funciona.
+        Utiliza comando.run_etl() en el directorio temporal del lote.
         """
-        import csv, gzip, io
-        os.makedirs(out_dir, exist_ok=True) 
+        try:
+            # Crear directorio temporal para este lote
+            batch_output = tempfile.mkdtemp(prefix="cat_batch_output_")
+            
+            # Usar la función que funciona de comando.py
+            comando.run_etl(batch_dir, muni, batch_output)
+            
+            # Mover/combinar resultados al directorio final
+            esperados = [
+                "reg11_finca.csv", "reg13_uc.csv", "reg14_construccion.csv",
+                "reg15_inmueble.csv", "reg16_reparto.csv", "reg17_cultivo.csv",
+                "resumen_parcela.csv"
+            ]
+            
+            for fname in esperados:
+                src_path = os.path.join(batch_output, fname)
+                if os.path.isfile(src_path):
+                    dst_path = os.path.join(final_out_dir, fname)
+                    
+                    # Si el archivo destino ya existe, anexar sin duplicar cabeceras
+                    if os.path.exists(dst_path):
+                        append_csv_content(src_path, dst_path)
+                    else:
+                        # Copiar directamente
+                        shutil.copy2(src_path, dst_path)
+            
+            # Limpiar directorio temporal del lote
+            shutil.rmtree(batch_output, ignore_errors=True)
+            
+        except Exception as e:
+            st.error(f"Error procesando lote: {e}")
+            raise e
 
-        REG_MAP = {
-            "11": "reg11_finca.csv",
-            "13": "reg13_uc.csv",
-            "14": "reg14_construccion.csv",
-            "15": "reg15_inmueble.csv",
-            "16": "reg16_reparto.csv",
-            "17": "reg17_cultivo.csv",
-        }
-
-        def detect_delimiter(sample_text: str) -> str | None:
-            candidates = ["|", ";", "\t", ","]
-            counts = {d: sample_text.count(d) for d in candidates}
-            delim = max(counts, key=counts.get)
-            return delim if counts[delim] > 0 else None
-
-        # Abrimos en binario para muestrear y decidir delimitador
-        is_gz = src_path.lower().endswith(".gz")
-        opener_bin = (lambda: open(src_path, "rb")) if not is_gz else (lambda: gzip.open(src_path, "rb"))
-        with opener_bin() as fb:
-            sample = fb.read(65536)  # 64 KB
-            try:
-                sample_txt = sample.decode("latin-1", errors="replace")
-            except Exception:
-                sample_txt = sample.decode("utf-8", errors="replace")
-            delim = detect_delimiter(sample_txt)
-
-        # Reabrimos en texto para iterar líneas
-        opener_txt = (lambda: open(src_path, "rt", encoding="latin-1", errors="replace", newline="")) \
-                    if not is_gz else (lambda: gzip.open(src_path, "rt", encoding="latin-1", errors="replace", newline=""))
-
-        writers, files = {}, {}
-        counts = {k: 0 for k in REG_MAP.keys()}
-
-        def get_writer(target_name: str):
-            path = os.path.join(out_dir, target_name)
-            if target_name not in writers:
-                fh = open(path, "a", encoding="utf-8", newline="")
-                files[target_name] = fh
-                writers[target_name] = csv.writer(fh)
-            return writers[target_name]
-
-        with opener_txt() as fh:
-            if delim:
-                # lector CSV con delimitador detectado
-                reader = csv.reader(fh, delimiter=delim)
-                for row in reader:
-                    if not row:
-                        continue
-                    code = (row[0] or "").lstrip("\ufeff").strip()  # quita BOM si viene
-                    target = REG_MAP.get(code)
-                    if not target:
-                        continue
-                    get_writer(target).writerow(row)
-                    counts[code] += 1
-            else:
-                # fallback sin delimitador: usa 2 primeros chars como código y vuelca la línea entera
-                # (mejor ajustarlo si tienes especificación de ancho fijo)
-                for line in fh:
-                    if not line.strip():
-                        continue
-                    s = line.lstrip("\ufeff")
-                    code = s[:2].strip()
-                    target = REG_MAP.get(code)
-                    if not target:
-                        continue
-                    get_writer(target).writerow([s.rstrip("\r\n")])
-                    counts[code] += 1
-
-        for fh in files.values():
-            try: fh.close()
-            except: pass
-
-        return counts
+    def append_csv_content(src_path: str, dst_path: str):
+        """
+        Añade contenido de un CSV al final de otro, evitando duplicar cabeceras.
+        """
+        try:
+            with open(src_path, 'r', encoding='utf-8') as src_file:
+                lines = src_file.readlines()
+            
+            # Si el archivo tiene contenido, saltar la primera línea (cabecera)
+            if len(lines) > 1:
+                content_to_append = lines[1:]  # Todo excepto la cabecera
+                
+                with open(dst_path, 'a', encoding='utf-8') as dst_file:
+                    dst_file.writelines(content_to_append)
+        except Exception as e:
+            st.warning(f"Error anexando contenido de {src_path}: {e}")
 
     # ---- UI (staging + bloques) ----
     # --- al inicio de tu sección UI, antes de crear el file_uploader ---
@@ -2814,6 +2764,7 @@ def main():
                             status.update(label=f"Lote {i//int(lote_tam)+1} ({processed}/{len(this_block)})…")
 
                             batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
+                            
                             # materializa el lote
                             for item in batch:
                                 if item["kind"] == "file":
@@ -2824,17 +2775,10 @@ def main():
                                 else:
                                     with zipfile.ZipFile(item["zip_path"], "r") as zf:
                                         zf.extract(item["member"], path=batch_dir)
-                            # recoge .cat/.gz recursivo
-                            to_process = []
-                            for root, _, names in os.walk(batch_dir):
-                                for n in names:
-                                    ln = n.lower()
-                                    if ln.endswith(".cat") or ln.endswith(".cat.gz"):
-                                        to_process.append(os.path.join(root, n))
-
-                            # procesar en streaming
-                            for one in to_process:
-                                stream_split_single_file(one, OUT_DIR)
+                            
+                            # *** CAMBIO CLAVE: Usar comando.py para procesar el lote ***
+                            st.write(f"🔄 Procesando lote {i//int(lote_tam)+1} con comando.py...")
+                            process_batch_with_comando(batch_dir, selected_muni_clean, OUT_DIR)
 
                             shutil.rmtree(batch_dir, ignore_errors=True)
                             processed += len(batch)
@@ -2856,10 +2800,11 @@ def main():
             else:
                 st.success("Todo procesado!!!!--->Generando archivos de salida…")
 
-                # Archivos esperados
+                # Archivos esperados (incluyendo resumen_parcela.csv del local)
                 esperados = [
                     "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
                     "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
+                    "resumen_parcela.csv"  # Este también se genera en el código local
                 ]
                 generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
                 
@@ -2921,15 +2866,32 @@ def main():
                         except Exception as e:
                             st.error(f"Error creando ZIP: {e}")
                             st.info("💡 Los archivos individuales siguen disponibles arriba.")
+                    
+                    # También ofrecer descargas de CSV tradicionales
+                    st.markdown("### Descargar CSV tradicionales:")
+                    csv_cols = st.columns(min(4, len(generados)))
+                    for idx, fname in enumerate(generados):
+                        col = csv_cols[idx % len(csv_cols)]
+                        with col:
+                            fpath = os.path.join(OUT_DIR, fname)
+                            with open(fpath, "rb") as fh:
+                                file_size = os.path.getsize(fpath)
+                                st.download_button(
+                                    f"📄 {fname}\n({file_size//1024} KB)",
+                                    data=fh.read(),
+                                    file_name=fname,
+                                    mime="text/csv",
+                                    key=f"dl_csv_{idx}"
+                                )
 
-        st.markdown("---")
-        st.markdown("""
-            <div style='text-align: center; color: #666; font-size: 0.8em;'>
-                📊 Aplicación de Indicadores INE por Municipio<br>
-                Datos del Instituto Nacional de Estadística (INE)
-            </div>
-            """, unsafe_allow_html=True)
-        
+    st.markdown("---")
+    st.markdown("""
+        <div style='text-align: center; color: #666; font-size: 0.8em;'>
+            📊 Aplicación de Indicadores INE por Municipio<br>
+            Datos del Instituto Nacional de Estadística (INE)
+        </div>
+        """, unsafe_allow_html=True)
+    
 if __name__ == "__main__":
     try:
         main()
