@@ -2380,7 +2380,7 @@ def main():
     #-----------------------------------------------------------------------------------
 
     import pickle
-    import pandas as pd
+
     from io import BytesIO
 
     # === ETL Catastro (subidas grandes, por lotes, robusto) ===
