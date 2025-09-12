@@ -21,7 +21,7 @@ import comando  # tu ETL
 import gc
 import time
 import uuid, json 
-
+import csv, gzip
 
 
 def main():
@@ -2441,7 +2441,7 @@ def main():
         correspondiente según el primer campo (código de registro).
         Detecta delimitador y BOM. Devuelve contadores por código.
         """
-        import csv, gzip, io
+        
         os.makedirs(out_dir, exist_ok=True) 
 
         REG_MAP = {
