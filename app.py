@@ -16,6 +16,12 @@ import streamlit as st
 import traceback, sys, os
 st.set_page_config(page_title="Indicadores Khôra", layout="wide")
 import contextlib 
+import pickle
+from io import BytesIO
+import comando  # Import your working ETL script
+import json
+import shutil, gc
+
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2375,10 +2381,13 @@ def main():
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
 
-    import pickle
-    import pandas as pd
-    from io import BytesIO
-    import comando  # Import your working ETL script
+    #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
+
+
 
     # === ETL Catastro (subidas grandes, por lotes, robusto) ===
     OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
@@ -2851,17 +2860,20 @@ def main():
                         st.info("Creando ZIP...")
                         try:
                             zip_path = build_outputs_zip(OUT_DIR, generados, selected_muni_clean)
-                            with open(zip_path, "rb") as fh:
-                                zip_data = fh.read()
-                            
-                            st.download_button(
-                                f"⬇️ Descargar ZIP ({len(zip_data)//1024//1024} MB)",
-                                data=zip_data, 
-                                file_name=os.path.basename(zip_path), 
-                                mime="application/zip", 
-                                key="dl_zip_final"
-                            )
-                            st.success("✅ ZIP creado correctamente")
+                            if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
+                                with open(zip_path, "rb") as fh:
+                                    zip_data = fh.read()
+                                
+                                st.download_button(
+                                    f"⬇️ Descargar ZIP ({len(zip_data)//1024//1024} MB)",
+                                    data=zip_data, 
+                                    file_name=os.path.basename(zip_path), 
+                                    mime="application/zip", 
+                                    key="dl_zip_final"
+                                )
+                                st.success("✅ ZIP creado correctamente")
+                            else:
+                                st.error("Error: ZIP creado está vacío o no existe")
                             
                         except Exception as e:
                             st.error(f"Error creando ZIP: {e}")
@@ -2883,6 +2895,16 @@ def main():
                                     mime="text/csv",
                                     key=f"dl_csv_{idx}"
                                 )
+
+
+
+
+
+
+
+
+
+
 
     st.markdown("---")
     st.markdown("""
