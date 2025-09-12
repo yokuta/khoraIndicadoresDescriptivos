@@ -2369,38 +2369,47 @@ def main():
 
   
 
+    #-----------------------------------------------------------------------------------
 
-    # ---- configuración de salida (fija en el servidor) ----
-    OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímera)
+
+
+
+
+
+    # === ETL Catastro (subidas grandes, por lotes, robusto) ===
+    OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # ---- helpers ----
     def _solo_nombre_muni(s: str) -> str:
-        if s is None:
-            return ""
+        if s is None: return ""
         s = str(s).strip()
         s = re.sub(r"^\s*\d+\s*[-–—:.·]*\s*", "", s)
         return s.strip()
 
-    def batched(iterable, n: int):
-        """Yield listas de tamaño n."""
-        batch = []
-        for x in iterable:
-            batch.append(x)
-            if len(batch) == n:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
+    def have_disk(min_free_mb: int = 256) -> bool:
+        total, used, free = shutil.disk_usage("/tmp")
+        return (free // (1024 * 1024)) >= min_free_mb
+
+    def mem_free_mb() -> int:
+        # estimación rápida en Linux sin psutil
+        try:
+            with open("/proc/meminfo") as fh:
+                vals = {k.rstrip(":"): int(v.split()[0]) for k, v in
+                        (line.split(None, 2)[:2] for line in fh)}
+            # MemAvailable está en kB
+            return vals.get("MemAvailable", vals.get("MemFree", 0)) // 1024
+        except Exception:
+            return 0
 
     def append_csv(src_path: str, dst_path: str):
-        """Añade src a dst evitando duplicar cabeceras, sin cargar todo en RAM."""
+        """Append sin duplicar cabeceras, en binario y por chunks."""
         if not os.path.exists(dst_path):
             with open(src_path, "rb") as src, open(dst_path, "wb") as dst:
                 shutil.copyfileobj(src, dst, length=1024*1024)
             return
         with open(src_path, "rb") as src, open(dst_path, "ab") as dst:
-            _ = src.readline()  # descarta cabecera
+            _ = src.readline()  # saltar cabecera
             shutil.copyfileobj(src, dst, length=1024*1024)
 
     def merge_outputs(batch_out_dir: str, final_out_dir: str, esperados: list[str]):
@@ -2412,7 +2421,7 @@ def main():
                 append_csv(src, dst)
 
     # ---- UI ----
-    st.markdown("## 🧱 ETL Juan (sube tus ficheros CAT)")
+    st.markdown("## 🧱 ETL Catastro (sube tus ficheros CAT)")
 
     selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
     if not selected_muni_clean:
@@ -2427,122 +2436,146 @@ def main():
             accept_multiple_files=True
         )
     with col2:
-        lote_tam = st.number_input("Tamaño de lote (# ficheros por ejecución)", 1, 50, 10, step=1)
+        lote_tam = st.number_input("Tamaño de lote (# ficheros por ejecución)",
+                                min_value=1, max_value=20, value=1, step=1)
 
     run = st.button("▶️ Ejecutar ETL", disabled=(not files))
+    if not run:
+        st.stop()
 
-    if run:
-        if not files:
-            st.error("❌ Sube al menos un fichero CAT/CAT.gz o un ZIP.")
-            st.stop()
+    if not files:
+        st.error("❌ Sube al menos un fichero CAT/CAT.gz o un ZIP.")
+        st.stop()
 
-        # 1) Preparar carpetas temporales
-        work_dir = tempfile.mkdtemp(prefix="cat_work_")
-        tmp_in = os.path.join(work_dir, "in")
-        os.makedirs(tmp_in, exist_ok=True)
+    # 1) Preparar carpeta de trabajo
+    work_dir = tempfile.mkdtemp(prefix="cat_work_")
+    tmp_in   = os.path.join(work_dir, "in")
+    os.makedirs(tmp_in, exist_ok=True)
 
-        # 2) Guardar uploads en disco (streaming) y extraer ZIPs
-        for f in files:
-            name = f.name
-            dst = os.path.join(tmp_in, name)
-            f.seek(0)
-            with open(dst, "wb") as fh:
-                shutil.copyfileobj(f, fh, length=1024*1024)  # 1MB por chunk
-            if name.lower().endswith(".zip"):
-                with zipfile.ZipFile(dst, "r") as zf:
-                    zf.extractall(tmp_in)
-                try:
-                    os.remove(dst)
-                except OSError:
-                    pass
+    # 2) Guardar uploads sin cargar todo a memoria
+    for f in files:
+        dst = os.path.join(tmp_in, f.name)
+        f.seek(0)
+        with open(dst, "wb") as fh:
+            shutil.copyfileobj(f, fh, length=1024*1024)
 
-        # (opcional) normaliza nombres a minúsculas para evitar problemas en Linux
-        for root, _, names in os.walk(tmp_in):
-            for name in names:
-                src = os.path.join(root, name)
-                dst = os.path.join(root, name.lower())
-                if src != dst and not os.path.exists(dst):
-                    try:
-                        os.rename(src, dst)
-                    except OSError:
-                        pass
+    # 3) Construir una lista de ENTRADAS a procesar sin extraer todo de golpe
+    #    - .cat / .cat.gz: procesar directo
+    #    - .zip: procesar cada miembro del zip uno por uno
+    inputs = []  # cada item: dict con tipo y cómo obtener el archivo físico
 
-        # 3) Recopilar archivos .cat y .cat.gz (recursivo y case-insensitive)
-        cat_files = []
-        for root, _, names in os.walk(tmp_in):
-            for name in names:
-                lname = name.lower()
-                if lname.endswith(".cat") or lname.endswith(".cat.gz"):
-                    cat_files.append(os.path.join(root, name))
+    for name in os.listdir(tmp_in):
+        p = os.path.join(tmp_in, name)
+        low = name.lower()
+        if low.endswith(".cat") or low.endswith(".cat.gz"):
+            inputs.append({"kind": "file", "path": p, "name": name})
+        elif low.endswith(".zip"):
+            try:
+                zf = zipfile.ZipFile(p, "r")
+                for zi in zf.infolist():
+                    lni = zi.filename.lower()
+                    if lni.endswith(".cat") or lni.endswith(".cat.gz"):
+                        inputs.append({"kind": "zip-entry", "zip_path": p, "member": zi.filename})
+            except zipfile.BadZipFile:
+                st.warning(f"ZIP corrupto ignorado: {name}")
 
-        total = len(cat_files)
-        if total == 0:
-            st.error("No se encontraron ficheros .cat / .cat.gz tras preparar la entrada.")
-            st.stop()
+    total = len(inputs)
+    if total == 0:
+        st.error("No se encontraron .cat / .cat.gz en los archivos subidos (ni dentro de ZIPs).")
+        st.stop()
 
-        # 4) Ejecutar ETL por lotes
-        buf = io.StringIO()
-        procesados = 0
-        esperados = [
-            "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
-            "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
-            "resumen_parcela.csv",
-        ]
+    buf = io.StringIO()
+    esperados = [
+        "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
+        "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
+        "resumen_parcela.csv",
+    ]
 
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            with st.status("Ejecutando ETL por lotes…", expanded=True) as status:
-                try:
-                    for i, batch in enumerate(batched(cat_files, int(lote_tam)), start=1):
-                        status.update(label=f"Procesando lote {i} ({procesados}/{total})…")
-                        # crear carpeta de lote y mover SOLO los ficheros del lote
-                        batch_dir = os.path.join(work_dir, f"batch_{i}")
-                        os.makedirs(batch_dir, exist_ok=True)
-                        for p in batch:
-                            shutil.move(p, os.path.join(batch_dir, os.path.basename(p)))
+    # 4) Procesar por lotes “reales”, pero cada lote se materializa a disco y se borra enseguida
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        with st.status("Procesando…", expanded=True) as status:
+            try:
+                processed = 0
+                i = 0
+                while i < total:
+                    batch = inputs[i:i+int(lote_tam)]
+                    i += int(lote_tam)
 
-                        # salida temporal del lote
-                        batch_out = os.path.join(work_dir, f"out_{i}")
-                        os.makedirs(batch_out, exist_ok=True)
+                    # Guardas de recursos
+                    if not have_disk(256):
+                        raise RuntimeError("⛔️ Espacio insuficiente en /tmp (<256 MB libres).")
+                    if mem_free_mb() < 256:
+                        raise MemoryError("⛔️ Memoria disponible insuficiente (<256 MB).")
 
-                        # ejecutar tu ETL sobre el lote
-                        print(f"[Lote {i}] ETL sobre {len(batch)} ficheros…")
-                        comando.run_etl(batch_dir, selected_muni_clean, batch_out)
+                    status.update(label=f"Lote {processed+1}… ({processed}/{total})")
 
-                        # fusionar salidas del lote en la salida final fija OUT_DIR
-                        merge_outputs(batch_out, OUT_DIR, esperados)
+                    # preparar carpeta de lote y materializar SOLO los miembros necesarios
+                    batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
+                    for item in batch:
+                        if item["kind"] == "file":
+                            # mover (no duplicar)
+                            src = item["path"]
+                            dst = os.path.join(batch_dir, os.path.basename(item["name"]))
+                            shutil.move(src, dst)
+                        else:
+                            # extraer SOLO ese miembro del zip
+                            zpath = item["zip_path"]
+                            member = item["member"]
+                            with zipfile.ZipFile(zpath, "r") as zf:
+                                # extrae directo al batch_dir
+                                zf.extract(member, path=batch_dir)
+                                # si el zip tenía subcarpetas, aplanamos
+                                extracted = os.path.join(batch_dir, member)
+                                flat = os.path.join(batch_dir, os.path.basename(member))
+                                if extracted != flat:
+                                    os.makedirs(os.path.dirname(flat), exist_ok=True)
+                                    try:
+                                        os.replace(extracted, flat)
+                                        # borra árbol vacío
+                                        base = os.path.dirname(extracted)
+                                        shutil.rmtree(os.path.join(batch_dir, member.split("/")[0]), ignore_errors=True)
+                                    except Exception:
+                                        pass
 
-                        # limpiar lote para liberar espacio
-                        shutil.rmtree(batch_dir, ignore_errors=True)
-                        shutil.rmtree(batch_out, ignore_errors=True)
+                    # salida temporal del lote
+                    batch_out = tempfile.mkdtemp(prefix="out_batch_")
 
-                        procesados += len(batch)
-                        st.write(f"✅ Lote {i} completado. Progreso: {procesados}/{total}")
-                        gc.collect()
+                    # ejecutar ETL sobre el lote
+                    print(f"[Lote] ETL sobre {len(os.listdir(batch_dir))} fichero(s)…")
+                    comando.run_etl(batch_dir, selected_muni_clean, batch_out)
 
-                    status.update(label="✅ ETL finalizado (todos los lotes)", state="complete")
-                except Exception as e:
-                    status.update(label="❌ ETL con errores", state="error")
-                    st.exception(e)
+                    # fusionar en OUT_DIR y limpiar
+                    merge_outputs(batch_out, OUT_DIR, esperados)
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    shutil.rmtree(batch_out,  ignore_errors=True)
 
-        # 5) Log completo
-        st.subheader("📝 Log de ejecución")
-        st.text(buf.getvalue())
+                    processed += len(batch)
+                    st.write(f"✅ Lote completado. Progreso: {processed}/{total}")
 
-        # 6) Ofrecer descargas finales desde OUT_DIR
-        generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
-        if generados:
-            st.subheader("⬇️ Archivos generados")
-            for fname in generados:
-                fpath = os.path.join(OUT_DIR, fname)
-                with open(fpath, "rb") as fh:
-                    st.download_button(
-                        f"Descargar {fname}",
-                        data=fh.read(),
-                        file_name=fname,
-                        mime="text/csv",
-                    )
-        else:
-            st.info("No se encontraron CSV esperados en la carpeta de salida.")
+                    gc.collect()
+
+                status.update(label="✅ ETL finalizado", state="complete")
+
+            except MemoryError as e:
+                status.update(label="❌ Sin memoria", state="error")
+                st.error(str(e))
+            except Exception as e:
+                status.update(label="❌ ETL con errores", state="error")
+                st.exception(e)
+
+    # 5) Log y descargas
+    st.subheader("📝 Log de ejecución")
+    st.text(buf.getvalue())
+
+    generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
+    if generados:
+        st.subheader("⬇️ Archivos generados")
+        for fname in generados:
+            fpath = os.path.join(OUT_DIR, fname)
+            with open(fpath, "rb") as fh:
+                st.download_button(f"Descargar {fname}", data=fh.read(), file_name=fname, mime="text/csv")
+    else:
+        st.info("No se encontraron CSV esperados en la carpeta de salida.")
 
 
 
