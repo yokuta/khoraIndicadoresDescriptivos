@@ -2371,419 +2371,362 @@ def main():
         st.info("Selecciona un municipio para calcular áreas e intersecciones.")
 
   
+#-----------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------
 
-    #-----------------------------------------------------------------------------------
-    #-----------------------------------------------------------------------------------
-    #-----------------------------------------------------------------------------------
-    #-----------------------------------------------------------------------------------
-    #-----------------------------------------------------------------------------------
+# === ETL Catastro (subidas grandes, por lotes, robusto) ===
+OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
+os.makedirs(OUT_DIR, exist_ok=True)
 
+# ---- helpers ----
+def _solo_nombre_muni(s: str) -> str:
+    if s is None: return ""
+    s = str(s).strip()
+    s = re.sub(r"^\s*\d+\s*[-–—:.·]*\s*", "", s)
+    return s.strip()
 
+def have_disk(min_free_mb: int = 256) -> bool:
+    total, used, free = shutil.disk_usage("/tmp")
+    return (free // (1024 * 1024)) >= min_free_mb
 
+def mem_free_mb() -> int:
+    # estimación rápida en Linux sin psutil
+    try:
+        with open("/proc/meminfo") as fh:
+            vals = {k.rstrip(":"): int(v.split()[0]) for k, v in
+                    (line.split(None, 2)[:2] for line in fh)}
+        # MemAvailable está en kB
+        return vals.get("MemAvailable", vals.get("MemFree", 0)) // 1024
+    except Exception:
+        return 0
 
-
-
-    # === ETL Catastro (subidas grandes, por lotes, robusto) ===
-    OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-    # ---- helpers ----
-    def _solo_nombre_muni(s: str) -> str:
-        if s is None: return ""
-        s = str(s).strip()
-        s = re.sub(r"^\s*\d+\s*[-–—:.·]*\s*", "", s)
-        return s.strip()
-
-    def have_disk(min_free_mb: int = 256) -> bool:
-        total, used, free = shutil.disk_usage("/tmp")
-        return (free // (1024 * 1024)) >= min_free_mb
-
-    def mem_free_mb() -> int:
-        # estimación rápida en Linux sin psutil
-        try:
-            with open("/proc/meminfo") as fh:
-                vals = {k.rstrip(":"): int(v.split()[0]) for k, v in
-                        (line.split(None, 2)[:2] for line in fh)}
-            # MemAvailable está en kB
-            return vals.get("MemAvailable", vals.get("MemFree", 0)) // 1024
-        except Exception:
-            return 0
-
-    def append_csv(src_path: str, dst_path: str):
-        """Append sin duplicar cabeceras, en binario y por chunks."""
-        if not os.path.exists(dst_path):
-            with open(src_path, "rb") as src, open(dst_path, "wb") as dst:
-                shutil.copyfileobj(src, dst, length=1024*1024)
-            return
-        with open(src_path, "rb") as src, open(dst_path, "ab") as dst:
-            _ = src.readline()  # saltar cabecera
+def append_csv(src_path: str, dst_path: str):
+    """Append sin duplicar cabeceras, en binario y por chunks."""
+    if not os.path.exists(dst_path):
+        with open(src_path, "rb") as src, open(dst_path, "wb") as dst:
             shutil.copyfileobj(src, dst, length=1024*1024)
+        return
+    with open(src_path, "rb") as src, open(dst_path, "ab") as dst:
+        _ = src.readline()  # saltar cabecera
+        shutil.copyfileobj(src, dst, length=1024*1024)
 
-    def merge_outputs(batch_out_dir: str, final_out_dir: str, esperados: list[str]):
-        os.makedirs(final_out_dir, exist_ok=True)
-        for fname in esperados:
-            src = os.path.join(batch_out_dir, fname)
-            if os.path.isfile(src):
-                dst = os.path.join(final_out_dir, fname)
-                append_csv(src, dst)
+def merge_outputs(batch_out_dir: str, final_out_dir: str, esperados: list[str]):
+    os.makedirs(final_out_dir, exist_ok=True)
+    for fname in esperados:
+        src = os.path.join(batch_out_dir, fname)
+        if os.path.isfile(src):
+            dst = os.path.join(final_out_dir, fname)
+            append_csv(src, dst)
 
-    def slugify(s: str) -> str:
-        s = re.sub(r"\s+", "_", s.strip())
-        s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
-        return s or "salida"
+def slugify(s: str) -> str:
+    s = re.sub(r"\s+", "_", s.strip())
+    s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
+    return s or "salida"
 
- 
+_ILLEGAL_WIN = r'[<>:"/\\|?*]'
 
-    _ILLEGAL_WIN = r'[<>:"/\\|?*]'
+def _sanitize_win_name(name: str) -> str:
+    # quita caracteres no válidos y puntos/espacios al final
+    s = re.sub(_ILLEGAL_WIN, "_", name).strip().rstrip(". ")
+    return s or "out"
 
-    def _sanitize_win_name(name: str) -> str:
-        # quita caracteres no válidos y puntos/espacios al final
-        s = re.sub(_ILLEGAL_WIN, "_", name).strip().rstrip(". ")
-        return s or "out"
+# --- NUEVO: procesado línea a línea, sin pandas ---
+def stream_split_single_file(src_path: str, out_dir: str):
+    """
+    Lee un .cat o .cat.gz en streaming y vuelca cada línea al CSV
+    correspondiente según el primer campo (código de registro).
+    Detecta delimitador y BOM. Devuelve contadores por código.
+    """
+    import csv, gzip, io
+    os.makedirs(out_dir, exist_ok=True) 
 
-    def build_outputs_zip(out_dir: str, file_names: list[str], muni: str) -> str:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        base = _sanitize_win_name(f"cat_{muni}_{ts}")
-        zip_path = os.path.join(out_dir, f"{base}.zip")
-        tmp_zip = zip_path + ".tmp"
+    REG_MAP = {
+        "11": "reg11_finca.csv",
+        "13": "reg13_uc.csv",
+        "14": "reg14_construccion.csv",
+        "15": "reg15_inmueble.csv",
+        "16": "reg16_reparto.csv",
+        "17": "reg17_cultivo.csv",
+    }
 
-        # crear ZIP con compatibilidad máxima y ZIP64 activado
-        with zipfile.ZipFile(
-            tmp_zip, "w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-            allowZip64=True
-        ) as zf:
-            for fname in file_names:
-                fpath = os.path.join(out_dir, fname)
-                if not os.path.isfile(fpath):
+    def detect_delimiter(sample_text: str) -> str | None:
+        candidates = ["|", ";", "\t", ","]
+        counts = {d: sample_text.count(d) for d in candidates}
+        delim = max(counts, key=counts.get)
+        return delim if counts[delim] > 0 else None
+
+    # Abrimos en binario para muestrear y decidir delimitador
+    is_gz = src_path.lower().endswith(".gz")
+    opener_bin = (lambda: open(src_path, "rb")) if not is_gz else (lambda: gzip.open(src_path, "rb"))
+    with opener_bin() as fb:
+        sample = fb.read(65536)  # 64 KB
+        try:
+            sample_txt = sample.decode("latin-1", errors="replace")
+        except Exception:
+            sample_txt = sample.decode("utf-8", errors="replace")
+        delim = detect_delimiter(sample_txt)
+
+    # Reabrimos en texto para iterar líneas
+    opener_txt = (lambda: open(src_path, "rt", encoding="latin-1", errors="replace", newline="")) \
+                if not is_gz else (lambda: gzip.open(src_path, "rt", encoding="latin-1", errors="replace", newline=""))
+
+    writers, files = {}, {}
+    counts = {k: 0 for k in REG_MAP.keys()}
+
+    def get_writer(target_name: str):
+        path = os.path.join(out_dir, target_name)
+        if target_name not in writers:
+            fh = open(path, "a", encoding="utf-8", newline="")
+            files[target_name] = fh
+            writers[target_name] = csv.writer(fh)
+        return writers[target_name]
+
+    with opener_txt() as fh:
+        if delim:
+            # lector CSV con delimitador detectado
+            reader = csv.reader(fh, delimiter=delim)
+            for row in reader:
+                if not row:
                     continue
-                arcname = _sanitize_win_name(os.path.basename(fname))  # nada de subcarpetas
-                zf.write(fpath, arcname=arcname)
-
-        # mover a definitivo (flush + close garantizados)
-        os.replace(tmp_zip, zip_path)
-
-        # validación: CRC de todos los miembros
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            bad = zf.testzip()
-            if bad:
-                # borra el ZIP malo para no ofrecer descargas rotas
-                try: os.remove(zip_path)
-                except: pass
-                raise RuntimeError(f"ZIP corrupto: primer fichero con CRC incorrecto: {bad}")
-
-        return zip_path
-
-    
-    # --- NUEVO: procesado línea a línea, sin pandas ---
-    def stream_split_single_file(src_path: str, out_dir: str):
-        """
-        Lee un .cat o .cat.gz en streaming y vuelca cada línea al CSV
-        correspondiente según el primer campo (código de registro).
-        Detecta delimitador y BOM. Devuelve contadores por código.
-        """
-        import csv, gzip, io
-        os.makedirs(out_dir, exist_ok=True) 
-
-        REG_MAP = {
-            "11": "reg11_finca.csv",
-            "13": "reg13_uc.csv",
-            "14": "reg14_construccion.csv",
-            "15": "reg15_inmueble.csv",
-            "16": "reg16_reparto.csv",
-            "17": "reg17_cultivo.csv",
-        }
-
-        def detect_delimiter(sample_text: str) -> str | None:
-            candidates = ["|", ";", "\t", ","]
-            counts = {d: sample_text.count(d) for d in candidates}
-            delim = max(counts, key=counts.get)
-            return delim if counts[delim] > 0 else None
-    
-       
-
-        
-
-        # Abrimos en binario para muestrear y decidir delimitador
-        is_gz = src_path.lower().endswith(".gz")
-        opener_bin = (lambda: open(src_path, "rb")) if not is_gz else (lambda: gzip.open(src_path, "rb"))
-        with opener_bin() as fb:
-            sample = fb.read(65536)  # 64 KB
-            try:
-                sample_txt = sample.decode("latin-1", errors="replace")
-            except Exception:
-                sample_txt = sample.decode("utf-8", errors="replace")
-            delim = detect_delimiter(sample_txt)
-
-        # Reabrimos en texto para iterar líneas
-        opener_txt = (lambda: open(src_path, "rt", encoding="latin-1", errors="replace", newline="")) \
-                    if not is_gz else (lambda: gzip.open(src_path, "rt", encoding="latin-1", errors="replace", newline=""))
-
-        writers, files = {}, {}
-        counts = {k: 0 for k in REG_MAP.keys()}
-
-        def get_writer(target_name: str):
-            path = os.path.join(out_dir, target_name)
-            if target_name not in writers:
-                fh = open(path, "a", encoding="utf-8", newline="")
-                files[target_name] = fh
-                writers[target_name] = csv.writer(fh)
-            return writers[target_name]
-
-        with opener_txt() as fh:
-            if delim:
-                # lector CSV con delimitador detectado
-                reader = csv.reader(fh, delimiter=delim)
-                for row in reader:
-                    if not row:
-                        continue
-                    code = (row[0] or "").lstrip("\ufeff").strip()  # quita BOM si viene
-                    target = REG_MAP.get(code)
-                    if not target:
-                        continue
-                    get_writer(target).writerow(row)
-                    counts[code] += 1
-            else:
-                # fallback sin delimitador: usa 2 primeros chars como código y vuelca la línea entera
-                # (mejor ajustarlo si tienes especificación de ancho fijo)
-                for line in fh:
-                    if not line.strip():
-                        continue
-                    s = line.lstrip("\ufeff")
-                    code = s[:2].strip()
-                    target = REG_MAP.get(code)
-                    if not target:
-                        continue
-                    get_writer(target).writerow([s.rstrip("\r\n")])
-                    counts[code] += 1
-
-        for fh in files.values():
-            try: fh.close()
-            except: pass
-
-        return counts
-
-
-    # ---- UI (staging + bloques) ----
-    # --- al inicio de tu sección UI, antes de crear el file_uploader ---
-    if "cat_reset" not in st.session_state:
-        st.session_state["cat_reset"] = 0  # contador para forzar reset del uploader
-
-    uploader_key = f"cat_up_{st.session_state['cat_reset']}"
-
-    SID = st.session_state.setdefault("etl_sid", str(uuid.uuid4()))
-    STAGE_DIR = os.path.join("/tmp/etl_stage", SID)
-    WORK_DIR  = os.path.join("/tmp/etl_work",  SID)
-    MANIFEST  = os.path.join(WORK_DIR, "manifest.json")
-    os.makedirs(STAGE_DIR, exist_ok=True)
-    os.makedirs(WORK_DIR,  exist_ok=True)
-
-    st.markdown("## 🧱 ETL Catastro (staging + bloques)")
-
-    selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
-    if not selected_muni_clean:
-        st.info("Selecciona un municipio arriba para poder ejecutar el ETL.")
-        st.stop()
-
-    col1, col2, col3 = st.columns([2,1,1])
-    with col1:
-
-        files = st.file_uploader(
-            "Sube CAT/CAT.gz (o un ZIP). Puedes subir en varias tandas.",
-            type=["cat", "gz", "zip"],
-            accept_multiple_files=True,
-            key=uploader_key,  # <- ¡clave dinámica!
-        )
-
-    with col2:
-        max_files_per_run = st.number_input(
-            "Máx. ficheros por ejecución", min_value=1, max_value=50, value=20, step=1
-        )
-    with col3:
-        lote_tam = st.number_input("Tamaño lote interno", min_value=1, max_value=20, value=5, step=1)
-
-    # 1) Añadir a STAGING
-    if files and st.button("➕ Añadir a staging (vuelca a disco y limpia memoria)"):
-        for f in files:
-            dst = os.path.join(STAGE_DIR, f.name)
-            f.seek(0)
-            with open(dst, "wb") as fh:
-                shutil.copyfileobj(f, fh, length=1024*1024)
-
-        # En vez de: st.session_state["cat_up"] = None  ❌
-        st.session_state["cat_reset"] += 1  # fuerza que el próximo rerun tenga un uploader nuevo (vacío)
-        st.success(f"Subidos {len(os.listdir(STAGE_DIR))} fichero(s) a {STAGE_DIR}.")
-        st.rerun()
-
-
-    st.caption(f"En staging: **{len(os.listdir(STAGE_DIR))}** fichero(s) en {STAGE_DIR}")
-
-    # Helpers para construir inputs desde STAGING
-    def build_inputs_from_dir(root_dir: str) -> list[dict]:
-        inputs = []
-        for name in os.listdir(root_dir):
-            p = os.path.join(root_dir, name)
-            low = name.lower()
-            if os.path.isdir(p):
-                # (por si alguien subió una carpeta dentro del ZIP)
-                for r, _, nn in os.walk(p):
-                    for n in nn:
-                        ln = n.lower()
-                        if ln.endswith(".cat") or ln.endswith(".cat.gz"):
-                            inputs.append({"kind":"file","path":os.path.join(r,n),"name":n})
-            elif low.endswith(".cat") or low.endswith(".cat.gz"):
-                inputs.append({"kind":"file","path":p,"name":name})
-            elif low.endswith(".zip"):
-                try:
-                    with zipfile.ZipFile(p, "r") as zf:
-                        for zi in zf.infolist():
-                            lni = zi.filename.lower()
-                            if lni.endswith(".cat") or lni.endswith(".cat.gz"):
-                                inputs.append({"kind":"zip-entry","zip_path":p,"member":zi.filename})
-                except zipfile.BadZipFile:
-                    st.warning(f"ZIP corrupto ignorado: {name}")
-        return inputs
-
-    def save_manifest(pending: list[dict]):
-        with open(MANIFEST, "w", encoding="utf-8") as fh:
-            json.dump(pending, fh)
-
-    def load_manifest() -> list[dict] | None:
-        if os.path.isfile(MANIFEST):
-            try:
-                with open(MANIFEST, "r", encoding="utf-8") as fh:
-                    return json.load(fh)
-            except Exception:
-                return None
-        return None
-
-    # 2) Botones de ejecución
-    colA, colB = st.columns(2)
-    start_clicked = colA.button("▶️ Procesar staging")
-    continue_clicked = colB.button("⏭️ Procesar siguiente bloque")
-
-    if start_clicked or continue_clicked:
-        # Carga o crea manifest
-        manifest = load_manifest()
-        if manifest is None or start_clicked:
-            manifest = build_inputs_from_dir(STAGE_DIR)
-            save_manifest(manifest)
-
-        total_pending = len(manifest)
-        if total_pending == 0:
-            st.info("No hay nada pendiente en el manifest.")
+                code = (row[0] or "").lstrip("\ufeff").strip()  # quita BOM si viene
+                target = REG_MAP.get(code)
+                if not target:
+                    continue
+                get_writer(target).writerow(row)
+                counts[code] += 1
         else:
-            # Protección de recursos
-            if not have_disk(256):
-                st.error("⛔️ Espacio insuficiente en /tmp (<256 MB libres).")
-                st.stop()
-            if mem_free_mb() < 256:
-                st.error("⛔️ Memoria disponible insuficiente (<256 MB).")
-                st.stop()
+            # fallback sin delimitador: usa 2 primeros chars como código y vuelca la línea entera
+            # (mejor ajustarlo si tienes especificación de ancho fijo)
+            for line in fh:
+                if not line.strip():
+                    continue
+                s = line.lstrip("\ufeff")
+                code = s[:2].strip()
+                target = REG_MAP.get(code)
+                if not target:
+                    continue
+                get_writer(target).writerow([s.rstrip("\r\n")])
+                counts[code] += 1
 
-            # Toma solo el bloque de esta ejecución
-            this_block = manifest[:int(max_files_per_run)]
-            remaining = manifest[int(max_files_per_run):]
+    for fh in files.values():
+        try: fh.close()
+        except: pass
 
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                with st.status(f"Procesando bloque de {len(this_block)} ficheros…", expanded=True) as status:
-                    try:
-                        processed = 0
-                        # divide en lotes internos para evitar muchas extracciones simultáneas
-                        for i in range(0, len(this_block), int(lote_tam)):
-                            batch = this_block[i:i+int(lote_tam)]
-                            status.update(label=f"Lote {i//int(lote_tam)+1} ({processed}/{len(this_block)})…")
+    return counts
 
-                            batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
-                            # materializa el lote
-                            for item in batch:
-                                if item["kind"] == "file":
-                                    src = item["path"]
-                                    dst = os.path.join(batch_dir, os.path.basename(item["name"]))
-                                    if os.path.abspath(src) != os.path.abspath(dst):
-                                        shutil.copy2(src, dst)
-                                else:
-                                    with zipfile.ZipFile(item["zip_path"], "r") as zf:
-                                        zf.extract(item["member"], path=batch_dir)
-                            # recoge .cat/.gz recursivo
-                            to_process = []
-                            for root, _, names in os.walk(batch_dir):
-                                for n in names:
-                                    ln = n.lower()
-                                    if ln.endswith(".cat") or ln.endswith(".cat.gz"):
-                                        to_process.append(os.path.join(root, n))
+# Función para comprimir CSV a .gz (binario comprimido)
+def compress_to_gz(csv_path: str, gz_path: str):
+    with open(csv_path, "rb") as f_in:
+        with gzip.open(gz_path, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
 
-                            # procesar en streaming
-                            for one in to_process:
-                                stream_split_single_file(one, OUT_DIR)
+# ---- UI (staging + bloques) ----
+# --- al inicio de tu sección UI, antes de crear el file_uploader ---
+if "cat_reset" not in st.session_state:
+    st.session_state["cat_reset"] = 0  # contador para forzar reset del uploader
 
-                            shutil.rmtree(batch_dir, ignore_errors=True)
-                            processed += len(batch)
-                            st.write(f"✅ Lote OK. Progreso bloque: {processed}/{len(this_block)}")
-                            gc.collect()
+uploader_key = f"cat_up_{st.session_state['cat_reset']}"
 
-                        status.update(label="✅ Bloque finalizado", state="complete")
-                    except Exception as e:
-                        status.update(label="❌ Error en el bloque", state="error")
-                        st.exception(e)
+SID = st.session_state.setdefault("etl_sid", str(uuid.uuid4()))
+STAGE_DIR = os.path.join("/tmp/etl_stage", SID)
+WORK_DIR  = os.path.join("/tmp/etl_work",  SID)
+MANIFEST  = os.path.join(WORK_DIR, "manifest.json")
+os.makedirs(STAGE_DIR, exist_ok=True)
+os.makedirs(WORK_DIR,  exist_ok=True)
 
-            st.subheader("Log del bloque")
-            st.text(buf.getvalue())
+st.markdown("## 🧱 ETL Catastro (staging + bloques)")
 
-            # Actualiza manifest y decide si seguimos
-            save_manifest(remaining)
-            if remaining:
-                st.info(f"Quedan {len(remaining)} fichero(s) por procesar. Pulsa **⏭️ Procesar siguiente bloque** para continuar.")
+selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
+if not selected_muni_clean:
+    st.info("Selecciona un municipio arriba para poder ejecutar el ETL.")
+    st.stop()
+
+col1, col2, col3 = st.columns([2,1,1])
+with col1:
+
+    files = st.file_uploader(
+        "Sube CAT/CAT.gz (o un ZIP). Puedes subir en varias tandas.",
+        type=["cat", "gz", "zip"],
+        accept_multiple_files=True,
+        key=uploader_key,  # <- ¡clave dinámica!
+    )
+
+with col2:
+    max_files_per_run = st.number_input(
+        "Máx. ficheros por ejecución", min_value=1, max_value=50, value=20, step=1
+    )
+with col3:
+    lote_tam = st.number_input("Tamaño lote interno", min_value=1, max_value=20, value=5, step=1)
+
+# 1) Añadir a STAGING
+if files and st.button("➕ Añadir a staging (vuelca a disco y limpia memoria)"):
+    for f in files:
+        dst = os.path.join(STAGE_DIR, f.name)
+        f.seek(0)
+        with open(dst, "wb") as fh:
+            shutil.copyfileobj(f, fh, length=1024*1024)
+
+    # En vez de: st.session_state["cat_up"] = None  ❌
+    st.session_state["cat_reset"] += 1  # fuerza que el próximo rerun tenga un uploader nuevo (vacío)
+    st.success(f"Subidos {len(os.listdir(STAGE_DIR))} fichero(s) a {STAGE_DIR}.")
+    st.rerun()
+
+st.caption(f"En staging: **{len(os.listdir(STAGE_DIR))}** fichero(s) en {STAGE_DIR}")
+
+# Helpers para construir inputs desde STAGING
+def build_inputs_from_dir(root_dir: str) -> list[dict]:
+    inputs = []
+    for name in os.listdir(root_dir):
+        p = os.path.join(root_dir, name)
+        low = name.lower()
+        if os.path.isdir(p):
+            # (por si alguien subió una carpeta dentro del ZIP)
+            for r, _, nn in os.walk(p):
+                for n in nn:
+                    ln = n.lower()
+                    if ln.endswith(".cat") or ln.endswith(".cat.gz"):
+                        inputs.append({"kind":"file","path":os.path.join(r,n),"name":n})
+        elif low.endswith(".cat") or low.endswith(".cat.gz"):
+            inputs.append({"kind":"file","path":p,"name":name})
+        elif low.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(p, "r") as zf:
+                    for zi in zf.infolist():
+                        lni = zi.filename.lower()
+                        if lni.endswith(".cat") or lni.endswith(".cat.gz"):
+                            inputs.append({"kind":"zip-entry","zip_path":p,"member":zi.filename})
+            except zipfile.BadZipFile:
+                st.warning(f"ZIP corrupto ignorado: {name}")
+    return inputs
+
+def save_manifest(pending: list[dict]):
+    with open(MANIFEST, "w", encoding="utf-8") as fh:
+        json.dump(pending, fh)
+
+def load_manifest() -> list[dict] | None:
+    if os.path.isfile(MANIFEST):
+        try:
+            with open(MANIFEST, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            return None
+    return None
+
+# 2) Botones de ejecución
+colA, colB = st.columns(2)
+start_clicked = colA.button("▶️ Procesar staging")
+continue_clicked = colB.button("⏭️ Procesar siguiente bloque")
+
+if start_clicked or continue_clicked:
+    # Carga o crea manifest
+    manifest = load_manifest()
+    if manifest is None or start_clicked:
+        manifest = build_inputs_from_dir(STAGE_DIR)
+        save_manifest(manifest)
+
+    total_pending = len(manifest)
+    if total_pending == 0:
+        st.info("No hay nada pendiente en el manifest.")
+    else:
+        # Protección de recursos
+        if not have_disk(256):
+            st.error("⛔️ Espacio insuficiente en /tmp (<256 MB libres).")
+            st.stop()
+        if mem_free_mb() < 256:
+            st.error("⛔️ Memoria disponible insuficiente (<256 MB).")
+            st.stop()
+
+        # Toma solo el bloque de esta ejecución
+        this_block = manifest[:int(max_files_per_run)]
+        remaining = manifest[int(max_files_per_run):]
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            with st.status(f"Procesando bloque de {len(this_block)} ficheros…", expanded=True) as status:
+                try:
+                    processed = 0
+                    # divide en lotes internos para evitar muchas extracciones simultáneas
+                    for i in range(0, len(this_block), int(lote_tam)):
+                        batch = this_block[i:i+int(lote_tam)]
+                        status.update(label=f"Lote {i//int(lote_tam)+1} ({processed}/{len(this_block)})…")
+
+                        batch_dir = tempfile.mkdtemp(prefix="cat_batch_")
+                        # materializa el lote
+                        for item in batch:
+                            if item["kind"] == "file":
+                                src = item["path"]
+                                dst = os.path.join(batch_dir, os.path.basename(item["name"]))
+                                if os.path.abspath(src) != os.path.abspath(dst):
+                                    shutil.copy2(src, dst)
+                            else:
+                                with zipfile.ZipFile(item["zip_path"], "r") as zf:
+                                    zf.extract(item["member"], path=batch_dir)
+                        # recoge .cat/.gz recursivo
+                        to_process = []
+                        for root, _, names in os.walk(batch_dir):
+                            for n in names:
+                                ln = n.lower()
+                                if ln.endswith(".cat") or ln.endswith(".cat.gz"):
+                                    to_process.append(os.path.join(root, n))
+
+                        # procesar en streaming
+                        for one in to_process:
+                            stream_split_single_file(one, OUT_DIR)
+
+                        shutil.rmtree(batch_dir, ignore_errors=True)
+                        processed += len(batch)
+                        st.write(f"✅ Lote OK. Progreso bloque: {processed}/{len(this_block)}")
+                        gc.collect()
+
+                    status.update(label="✅ Bloque finalizado", state="complete")
+                except Exception as e:
+                    status.update(label="❌ Error en el bloque", state="error")
+                    st.exception(e)
+
+        st.subheader("Log del bloque")
+        st.text(buf.getvalue())
+
+        # Actualiza manifest y decide si seguimos
+        save_manifest(remaining)
+        if remaining:
+            st.info(f"Quedan {len(remaining)} fichero(s) por procesar. Pulsa **⏭️ Procesar siguiente bloque** para continuar.")
+        else:
+            st.success("Todo procesado!!!!--->Generando archivos binarios comprimidos (.gz)…")
+
+            esperados = [
+                "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
+                "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
+            ]
+            generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
+            if generados:
+                # Comprimir cada CSV a .gz (binario comprimido para reducir tamaño)
+                gz_files = []
+                for fname in generados:
+                    csv_path = os.path.join(OUT_DIR, fname)
+                    gz_fname = fname + ".gz"
+                    gz_path = os.path.join(OUT_DIR, gz_fname)
+                    compress_to_gz(csv_path, gz_path)
+                    # Eliminar el CSV original para ahorrar espacio
+                    os.remove(csv_path)
+                    gz_files.append(gz_fname)
+
+                # Proporcionar botones de descarga individuales para cada .gz
+                st.subheader("Descargas individuales (archivos binarios comprimidos)")
+                for gz_fname in gz_files:
+                    gz_path = os.path.join(OUT_DIR, gz_fname)
+                    with open(gz_path, "rb") as fh:
+                        st.download_button(
+                            label=f"⬇️ Descargar {gz_fname}",
+                            data=fh,
+                            file_name=gz_fname,
+                            mime="application/gzip",
+                            key=f"dl_{gz_fname}"
+                        )
             else:
-                st.success("Todo procesado!!!!--->Generando ZIP…")
-
-                # Construir ZIP final y mostrar descarga
-                def slugify(s: str) -> str:
-                    s = (s or '').strip()
-                    s = re.sub(r"\s+", "_", s)
-                    s = re.sub(r"[^\w.-]", "", s, flags=re.ASCII)
-                    return s or "salida"
-
-                def build_outputs_zip(out_dir: str, csv_names: list[str], muni: str) -> str:
-                    ts = time.strftime("%Y%m%d_%H%M%S")
-                    zip_name = f"cat_{slugify(muni)}_{ts}.zip"
-                    zip_path = os.path.join(out_dir, zip_name)
-                    try:
-                        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_LZMA, allowZip64=True) as zf:
-                            for fn in csv_names:
-                                fp = os.path.join(out_dir, fn)
-                                if os.path.isfile(fp):
-                                    zf.write(fp, arcname=fn)
-                    except Exception:
-                        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as zf:
-                            for fn in csv_names:
-                                fp = os.path.join(out_dir, fn)
-                                if os.path.isfile(fp):
-                                    zf.write(fp, arcname=fn)
-                    return zip_path
-
-                esperados = [
-                    "reg11_finca.csv","reg13_uc.csv","reg14_construccion.csv",
-                    "reg15_inmueble.csv","reg16_reparto.csv","reg17_cultivo.csv",
-                ]
-                generados = [f for f in esperados if os.path.isfile(os.path.join(OUT_DIR, f))]
-                if generados:
-                    zip_path = build_outputs_zip(OUT_DIR, generados, selected_muni_clean)
-                    fh = open(zip_path, "rb")
-                    st.download_button(
-                        "⬇️ Descargar todo (ZIP)",
-                        data=fh, file_name=os.path.basename(zip_path), mime="application/zip", key="dl_zip_final"
-                    )
-                    fh.close()
-                else:
-                    st.info("No se encontraron CSV para empaquetar.")
-
-
-
-    
-
+                st.info("No se encontraron CSV para comprimir.")
 
 
         st.markdown("---")
