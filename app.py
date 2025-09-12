@@ -2687,7 +2687,7 @@ def main():
                 if fsize <= 50 * MB:
                     if st.button("Ver 1.000 filas", key=f"pv_{fname}"):
                         try:
-                            import pandas as pd
+                           
                             # motor python + autodetección delimitador, sin tipos pesados
                             df = pd.read_csv(
                                 fpath, nrows=1000, engine="python", dtype=str,
