@@ -2377,6 +2377,7 @@ def main():
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
     #-----------------------------------------------------------------------------------
+    #-----------------------------------------------------------------------------------
 
     # === ETL Catastro (subidas grandes, por lotes, robusto) ===
     OUT_DIR = "/tmp/etl_salida"   # salida final en el servidor (efímero)
@@ -2441,7 +2442,7 @@ def main():
         correspondiente según el primer campo (código de registro).
         Detecta delimitador y BOM. Devuelve contadores por código.
         """
-        
+        import csv, gzip, io
         os.makedirs(out_dir, exist_ok=True) 
 
         REG_MAP = {
@@ -2480,7 +2481,7 @@ def main():
         def get_writer(target_name: str):
             path = os.path.join(out_dir, target_name)
             if target_name not in writers:
-                fh = open(path, "a", encoding="utf-8", newline="")
+                fh = open(path, "w", encoding="utf-8", newline="")  # Cambiado a "w" para escribir cabeceras correctamente
                 files[target_name] = fh
                 writers[target_name] = csv.writer(fh)
             return writers[target_name]
