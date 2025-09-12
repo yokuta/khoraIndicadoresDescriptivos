@@ -18,6 +18,8 @@ st.set_page_config(page_title="Indicadores Khôra", layout="wide")
 import contextlib 
 import shutil, glob
 import comando  # tu ETL
+import gc
+
 
 def main():
     # -------------------- PAGE CONFIG --------------------
@@ -2410,7 +2412,7 @@ def main():
                 append_csv(src, dst)
 
     # ---- UI ----
-    st.markdown("## 🧱 ETL Catastro (sube tus ficheros CAT)")
+    st.markdown("## 🧱 ETL Juan (sube tus ficheros CAT)")
 
     selected_muni_clean = _solo_nombre_muni(selected_muni) if selected_muni else None
     if not selected_muni_clean:
