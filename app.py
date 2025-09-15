@@ -1918,7 +1918,7 @@ def main():
                 # D.06 municipal = población INE del año / (SUC + ADC) [ha]
                 sucadc_ha = st.session_state.get("SUCADCtotal_ha")  # set earlier when you computed SUC/ADC
                 row["D.06 Densidad sobre SUC+ADC (hab/ha)"] = (
-                    round(total / sucadc_ha, 2) if (total and sucadc_ha and sucadc_ha > 0) else None
+                    round(total / sucadc_ha *1000, 2) if (total and sucadc_ha and sucadc_ha > 0) else None
                 )
 
                 # Indicador nuevo: Superficie cultivos código19 / superficie municipio
@@ -1957,8 +1957,9 @@ def main():
                         viv_tot_2021 = None if pd.isna(vv) else float(vv)
 
                     if sucadc_ha and sucadc_ha > 0 and viv_tot_2021:
-                        # Usamos el valor de viviendas 2021 para todos los años (última referencia disponible)
-                        row["D.08. Densidad de vivienda (viv/ha)"] = round(viv_tot_2021 / sucadc_ha, 2)
+                        # Usamos el valor de viviendas 2021 para todos los años (última referencia disponible)     
+                        sucmod = sucadc_ha/1000       
+                        row["D.08. Densidad de vivienda (viv/ha)"] = round(viv_tot_2021/sucmod, 2)
                     else:
                         row["D.08. Densidad de vivienda (viv/ha)"] = None
                 except Exception:
